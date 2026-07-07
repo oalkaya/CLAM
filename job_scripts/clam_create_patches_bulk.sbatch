@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=clam_create_patches
+#SBATCH --job-name=clam_patches_bulk
 #SBATCH --partition=ai
 #SBATCH --account=ai
 #SBATCH --qos=ai
@@ -7,50 +7,55 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=04:00:00
+#SBATCH --time=24:00:00
 #SBATCH --chdir=/home/hpc-oalkaya/repos/CLAM
 
 set -euo pipefail
 
 required_vars=(
-    SLIDE_NAME
     RUN_ID
     REPO_DIR
-    RESULTS_DIR
-    ORIG_SLIDE
-    PRESET_PATH
-    SCRATCH_RUN_DIR
     SOURCE_DIR
+    RESULTS_DIR
+    PRESET_PATH
+    PROCESS_LIST_PATH
 )
 
 for var in "${required_vars[@]}"; do
     if [ -z "${!var:-}" ]; then
         echo "ERROR: Required variable ${var} is not set."
-        echo "Use the wrapper:"
-        echo "./job_scripts/run_clam_create_patches.sh \"<slide_filename>\""
+        echo
+        echo "Submit using:"
+        echo "./job_scripts/run_clam_create_patches_bulk.sh <all|positive_integer>"
         exit 1
     fi
 done
-
-cleanup() {
-    echo
-    echo "Removing temporary scratch directory:"
-    echo "${SCRATCH_RUN_DIR}"
-    rm -rf "${SCRATCH_RUN_DIR}"
-}
-trap cleanup EXIT
-
-mkdir -p "${SOURCE_DIR}"
 
 echo "Job started: $(date)"
 echo "Node: $(hostname)"
 echo "Slurm job ID: ${SLURM_JOB_ID}"
 echo
-echo "Slide: ${SLIDE_NAME}"
-echo "Original slide: ${ORIG_SLIDE}"
+echo "Run ID: ${RUN_ID}"
+echo "Source directory: ${SOURCE_DIR}"
 echo "Preset: ${PRESET_PATH}"
-echo "Scratch source: ${SOURCE_DIR}"
-echo "Results: ${RESULTS_DIR}"
+echo "Process list: ${PROCESS_LIST_PATH}"
+echo "Results directory: ${RESULTS_DIR}"
+echo
+
+echo "Selected slide count:"
+SELECTED_COUNT="$(
+    awk 'NR > 1 && $0 != "" { count++ } END { print count + 0 }' \
+        "${PROCESS_LIST_PATH}"
+)"
+echo "${SELECTED_COUNT}"
+echo
+
+echo "Preset contents:"
+cat "${PRESET_PATH}"
+echo
+
+echo "First selected slides:"
+head -n 6 "${PROCESS_LIST_PATH}"
 echo
 
 module purge
@@ -59,35 +64,33 @@ module load conda3/latest
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate clam_latest_valar
 
-echo "Copying slide to scratch..."
-rsync -avhP "${ORIG_SLIDE}" "${SOURCE_DIR}/"
-
+echo "Python environment:"
+which python
+python --version
 echo
-echo "Using preset:"
-cat "${PRESET_PATH}"
-
-echo
-echo "Running CLAM create_patches_fp.py..."
 
 cd "${REPO_DIR}"
+
+echo "Running CLAM directly against the PANNET slide directory..."
 
 python create_patches_fp.py \
     --source "${SOURCE_DIR}" \
     --save_dir "${RESULTS_DIR}" \
     --preset "${PRESET_PATH}" \
+    --process_list "${PROCESS_LIST_PATH}" \
     --patch_size 256 \
     --seg \
     --patch \
     --stitch
 
 echo
-echo "CLAM run finished."
+echo "CLAM bulk run finished."
 echo "Results saved under:"
 echo "${RESULTS_DIR}"
-
 echo
-echo "Result files:"
-find "${RESULTS_DIR}" -maxdepth 3 -print
+
+echo "Result summary:"
+find "${RESULTS_DIR}" -maxdepth 2 -type f -print
 
 echo
 echo "Job finished: $(date)"

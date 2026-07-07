@@ -9,19 +9,19 @@ fi
 
 SLIDE_NAME="$1"
 
-# Basic safety: filename only, not a path.
-if [[ "$SLIDE_NAME" == */* ]]; then
+# Accept only a filename, not a full path.
+if [[ "${SLIDE_NAME}" == */* ]]; then
     echo "ERROR: Pass only the slide filename, not a path."
     echo "Bad slide name: ${SLIDE_NAME}"
     exit 1
 fi
 
-# Accept .tif / .tiff, case-insensitive.
+# Accept .tif and .tiff, case-insensitive.
 case "${SLIDE_NAME,,}" in
     *.tif|*.tiff)
         ;;
     *)
-        echo "ERROR: Slide filename should end in .tif or .tiff"
+        echo "ERROR: Slide filename must end in .tif or .tiff."
         echo "Bad slide name: ${SLIDE_NAME}"
         exit 1
         ;;
@@ -30,18 +30,24 @@ esac
 REPO_DIR="/home/hpc-oalkaya/repos/CLAM"
 SLIDE_DIR="/userfiles/cgunduz/new_datasets/pannet_dataset/IPS/PANNET Slides"
 
+# The shared preset edited manually between experiments.
+BASE_PRESET_PATH="${REPO_DIR}/job_scripts/clam_pannet_preset.csv"
+
 ORIG_SLIDE="${SLIDE_DIR}/${SLIDE_NAME}"
 
-# Drop final suffix, e.g. "#1-1 7817B8509.tiff" -> "#1-1 7817B8509"
+# Example:
+# "#1-1 7817B8509.tiff" -> "#1-1 7817B8509"
 RUN_ID="${SLIDE_NAME%.*}"
 
-RUNS_DIR="${REPO_DIR}/runs"
-RUN_DIR="${RUNS_DIR}/${RUN_ID}"
+RUN_DIR="${REPO_DIR}/runs/patching/${RUN_ID}"
+CONFIG_DIR="${RUN_DIR}/config"
 LOG_DIR="${RUN_DIR}/logs"
 RESULTS_DIR="${RUN_DIR}/results"
 
-SCRATCH_BASE="/scratch/hpc-oalkaya/clam_temp"
-SCRATCH_RUN_DIR="${SCRATCH_BASE}/${RUN_ID}"
+# Store an immutable snapshot of the preset used by this run.
+RUN_PRESET_PATH="${CONFIG_DIR}/segmentation_preset.csv"
+
+SCRATCH_RUN_DIR="/scratch/hpc-oalkaya/clam_temp/patching/${RUN_ID}"
 SOURCE_DIR="${SCRATCH_RUN_DIR}/source"
 
 SBATCH_SCRIPT="${REPO_DIR}/job_scripts/clam_create_patches.sbatch"
@@ -54,39 +60,53 @@ if [ ! -f "${ORIG_SLIDE}" ]; then
     exit 1
 fi
 
+if [ ! -f "${BASE_PRESET_PATH}" ]; then
+    echo "ERROR: Patching preset does not exist:"
+    echo "${BASE_PRESET_PATH}"
+    exit 1
+fi
+
+if [ ! -f "${SBATCH_SCRIPT}" ]; then
+    echo "ERROR: Sbatch script does not exist:"
+    echo "${SBATCH_SCRIPT}"
+    exit 1
+fi
+
 if [ -e "${RUN_DIR}" ]; then
     echo "ERROR: Run folder already exists:"
     echo "${RUN_DIR}"
     echo
-    echo "To rerun this exact slide, remove the old run folder first:"
+    echo "Remove it before rerunning this slide:"
     echo "rm -rf \"${RUN_DIR}\""
     exit 1
 fi
 
-mkdir -p "${LOG_DIR}"
-mkdir -p "${RESULTS_DIR}"
+mkdir -p "${CONFIG_DIR}" "${LOG_DIR}" "${RESULTS_DIR}"
 
-# Export variables for the sbatch script.
-# This avoids fragile --export=A=B,C=D parsing with spaces/# in filenames.
+# Snapshot the current preset before submitting.
+cp "${BASE_PRESET_PATH}" "${RUN_PRESET_PATH}"
+
+# Export only what the sbatch job needs.
 export SLIDE_NAME
 export RUN_ID
 export REPO_DIR
-export RUN_DIR
-export LOG_DIR
 export RESULTS_DIR
 export ORIG_SLIDE
+export PRESET_PATH="${RUN_PRESET_PATH}"
 export SCRATCH_RUN_DIR
 export SOURCE_DIR
 
-echo "Submitting CLAM create_patches run"
-echo "SLIDE_NAME:      ${SLIDE_NAME}"
-echo "RUN_ID:          ${RUN_ID}"
-echo "REPO_DIR:        ${REPO_DIR}"
-echo "RUN_DIR:         ${RUN_DIR}"
-echo "LOG_DIR:         ${LOG_DIR}"
-echo "RESULTS_DIR:     ${RESULTS_DIR}"
-echo "ORIG_SLIDE:      ${ORIG_SLIDE}"
-echo "SCRATCH_RUN_DIR: ${SCRATCH_RUN_DIR}"
+echo "Submitting CLAM patching run"
+echo
+echo "Slide:       ${SLIDE_NAME}"
+echo "Run ID:      ${RUN_ID}"
+echo "Run dir:     ${RUN_DIR}"
+echo "Preset:      ${RUN_PRESET_PATH}"
+echo "Results dir: ${RESULTS_DIR}"
+echo "Scratch dir: ${SCRATCH_RUN_DIR}"
+echo
+echo "Preset contents:"
+cat "${RUN_PRESET_PATH}"
 echo
 
 sbatch \
