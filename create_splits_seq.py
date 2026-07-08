@@ -12,7 +12,7 @@ parser.add_argument('--seed', type=int, default=1,
                     help='random seed (default: 1)')
 parser.add_argument('--k', type=int, default=10,
                     help='number of splits (default: 10)')
-parser.add_argument('--task', type=str, choices=['task_1_tumor_vs_normal', 'task_2_tumor_subtyping'])
+parser.add_argument('--task', type=str, choices=['task_1_tumor_vs_normal', 'task_2_tumor_subtyping', 'task_pannet_grade'])
 parser.add_argument('--val_frac', type=float, default= 0.1,
                     help='fraction of labels for validation (default: 0.1)')
 parser.add_argument('--test_frac', type=float, default= 0.1,
@@ -40,6 +40,24 @@ elif args.task == 'task_2_tumor_subtyping':
                             patient_strat= True,
                             patient_voting='maj',
                             ignore=[])
+
+elif args.task == "task_pannet_grade":
+    args.n_classes = 3
+
+    dataset = Generic_WSI_Classification_Dataset(
+        csv_path="dataset_csv/pannet_wsi_grade.csv",
+        shuffle=False,
+        seed=args.seed,
+        print_info=True,
+        label_dict={
+            "A": 0,
+            "B": 1,
+            "C": 2,
+        },
+        label_col="ips", # Stratify over IPS to avoid majority based or maximum based voting over grades. Internally uses patient_voting="max" over the ips labels.
+        patient_strat=True,
+        ignore=[],
+    )
 
 else:
     raise NotImplementedError
