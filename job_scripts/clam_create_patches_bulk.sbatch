@@ -1,4 +1,5 @@
 #!/bin/bash
+
 #SBATCH --job-name=clam_patches_bulk
 #SBATCH --partition=ai
 #SBATCH --account=ai
@@ -13,84 +14,100 @@
 set -euo pipefail
 
 required_vars=(
-    RUN_ID
-    REPO_DIR
-    SOURCE_DIR
-    RESULTS_DIR
-    PRESET_PATH
-    PROCESS_LIST_PATH
+    RUN_ID RUN_MODE REPO_DIR SOURCE_DIR RESULTS_DIR
+    CONFIG_DIR LOG_DIR PATCH_MODE RESUME_MODE ATTEMPT_TAG
 )
 
 for var in "${required_vars[@]}"; do
-    if [ -z "${!var:-}" ]; then
-        echo "ERROR: Required variable ${var} is not set."
-        echo
-        echo "Submit using:"
-        echo "./job_scripts/run_clam_create_patches_bulk.sh <all|positive_integer>"
-        exit 1
-    fi
+    [ -n "${!var:-}" ] || { echo "ERROR: Required variable ${var} is not set."; exit 1; }
 done
+
+case "${RUN_MODE}" in single|mapped) ;; *) echo "ERROR: Unknown RUN_MODE: ${RUN_MODE}"; exit 1 ;; esac
+case "${PATCH_MODE}" in full|seg-only) ;; *) echo "ERROR: Unknown PATCH_MODE: ${PATCH_MODE}"; exit 1 ;; esac
+
+module purge
+module load conda3/latest
+source "$(conda info --base)/etc/profile.d/conda.sh"
+
+while [ "${CONDA_SHLVL:-0}" -gt 0 ]; do
+    conda deactivate || break
+done
+
+unset PYTHONPATH PYTHONHOME
+conda activate clam_latest_valar
+hash -r
+cd "${REPO_DIR}"
 
 echo "Job started: $(date)"
 echo "Node: $(hostname)"
 echo "Slurm job ID: ${SLURM_JOB_ID}"
-echo
 echo "Run ID: ${RUN_ID}"
-echo "Source directory: ${SOURCE_DIR}"
-echo "Preset: ${PRESET_PATH}"
-echo "Process list: ${PROCESS_LIST_PATH}"
-echo "Results directory: ${RESULTS_DIR}"
+echo "Run mode: ${RUN_MODE}"
+echo "Patching mode: ${PATCH_MODE}"
+echo "Python: $(which python)"
 echo
 
-echo "Selected slide count:"
-SELECTED_COUNT="$(
-    awk 'NR > 1 && $0 != "" { count++ } END { print count + 0 }' \
-        "${PROCESS_LIST_PATH}"
-)"
-echo "${SELECTED_COUNT}"
-echo
+run_clam() {
+    local preset_path="$1"
+    local process_list_path="$2"
 
-echo "Preset contents:"
-cat "${PRESET_PATH}"
-echo
+    local command=(
+        python -u create_patches_fp.py
+        --source "${SOURCE_DIR}"
+        --save_dir "${RESULTS_DIR}"
+        --preset "${preset_path}"
+        --process_list "${process_list_path}"
+        --patch_size 256
+        --step_size 256
+        --patch_level 0
+        --seg
+    )
 
-echo "First selected slides:"
-head -n 6 "${PROCESS_LIST_PATH}"
-echo
+    if [ "${PATCH_MODE}" = "full" ]; then
+        command+=(--patch --stitch)
+    fi
 
-module purge
-module load conda3/latest
+    printf ' %q' "${command[@]}"
+    echo
+    "${command[@]}"
+}
 
-source "$(conda info --base)/etc/profile.d/conda.sh"
-conda activate clam_latest_valar
+if [ "${RUN_MODE}" = "single" ]; then
+    [ -s "${PRESET_PATH}" ] || { echo "ERROR: Missing preset snapshot: ${PRESET_PATH}"; exit 1; }
+    [ -f "${PROCESS_LIST_PATH}" ] || { echo "ERROR: Missing process list: ${PROCESS_LIST_PATH}"; exit 1; }
+    run_clam "${PRESET_PATH}" "${PROCESS_LIST_PATH}"
+else
+    [ -f "${MAPPED_GROUPS_PATH}" ] || { echo "ERROR: Missing mapped groups file: ${MAPPED_GROUPS_PATH}"; exit 1; }
 
-echo "Python environment:"
-which python
-python --version
-echo
+    while IFS=$'\t' read -r preset preset_path process_list_path; do
+        [ "${preset}" != "preset" ] || continue
+        [ -n "${preset}" ] || continue
 
-cd "${REPO_DIR}"
+        group_log_dir="${LOG_DIR}/${preset}"
+        group_out="${group_log_dir}/${ATTEMPT_TAG}.out"
+        group_err="${group_log_dir}/${ATTEMPT_TAG}.err"
+        mkdir -p "${group_log_dir}"
 
-echo "Running CLAM directly against the PANNET slide directory..."
 
-python create_patches_fp.py \
-    --source "${SOURCE_DIR}" \
-    --save_dir "${RESULTS_DIR}" \
-    --preset "${PRESET_PATH}" \
-    --process_list "${PROCESS_LIST_PATH}" \
-    --patch_size 256 \
-    --seg \
-    --patch \
-    --stitch
+        echo "Running preset group: ${preset}"
+        rm -f "${RESULTS_DIR}/process_list_autogen.csv"
 
-echo
-echo "CLAM bulk run finished."
-echo "Results saved under:"
-echo "${RESULTS_DIR}"
-echo
+        if ! run_clam "${preset_path}" "${process_list_path}" >"${group_out}" 2>"${group_err}"; then
+            echo "ERROR: Preset group failed: ${preset}"
+            echo "Output: ${group_out}"
+            echo "Errors: ${group_err}"
+            exit 1
+        fi
 
-echo "Result summary:"
-find "${RESULTS_DIR}" -maxdepth 2 -type f -print
+        if [ -f "${RESULTS_DIR}/process_list_autogen.csv" ]; then
+            mv "${RESULTS_DIR}/process_list_autogen.csv" \
+               "${RESULTS_DIR}/process_list_autogen_${preset}.csv"
+        fi
+
+        echo "Completed preset group: ${preset}"
+    done < "${MAPPED_GROUPS_PATH}"
+fi
 
 echo
 echo "Job finished: $(date)"
+echo "Results: ${RESULTS_DIR}"

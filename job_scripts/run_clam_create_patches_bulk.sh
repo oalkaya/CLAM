@@ -1,68 +1,124 @@
 #!/bin/bash
 set -euo pipefail
 
-
-print_usage() {
-    echo "Usage: $0 <all|positive_integer> [--resume]"
+usage() {
+    echo "Usage:"
+    echo "  $0 <all|N|representatives|mapped> [options]"
     echo
-    echo "Create a new run:"
-    echo "  $0 all"
-    echo "  $0 25"
-    echo
-    echo "Resume an existing run:"
-    echo "  $0 all --resume"
-    echo "  $0 25 --resume"
+    echo "Options:"
+    echo "  --preset FILE.csv   Preset for all/N/representatives"
+    echo "  --mapping FILE.csv  Case map for mapped mode"
+    echo "  --seg-only          Run only segmentation"
+    echo "  --resume            Resume an existing run"
 }
 
-
-if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
-    print_usage
+if [ "$#" -lt 1 ]; then
+    usage
     exit 1
 fi
 
-LIMIT_ARG="$1"
-RESUME_MODE="false"
-
-if [ "$#" -eq 2 ]; then
-    case "$2" in
-        --resume)
-            RESUME_MODE="true"
-            ;;
-        *)
-            echo "ERROR: Unknown second argument: $2"
-            echo
-            print_usage
-            exit 1
-            ;;
-    esac
-fi
-
+SELECTION="$1"
+shift
 
 REPO_DIR="/home/hpc-oalkaya/repos/CLAM"
 SOURCE_DIR="/userfiles/cgunduz/new_datasets/pannet_dataset/IPS/PANNET Slides"
-
-BASE_PRESET_PATH="${REPO_DIR}/presets/clam_pannet_preset.csv"
 SBATCH_SCRIPT="${REPO_DIR}/job_scripts/clam_create_patches_bulk.sbatch"
+MAPPING_HELPER="${REPO_DIR}/job_scripts/build_pannet_mapped_process_lists.py"
 
+DEFAULT_PRESET="clam_pannet_preset.csv"
+PRESET_NAME="${DEFAULT_PRESET}"
+MAPPING_ARG=""
+PATCH_MODE="full"
+RESUME_MODE="false"
 
-# Interpret the slide-selection argument and determine the run name.
-case "${LIMIT_ARG,,}" in
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --preset)
+            [ "$#" -ge 2 ] || { echo "ERROR: --preset requires a filename."; exit 1; }
+            PRESET_NAME="$2"
+            shift 2
+            ;;
+        --mapping)
+            [ "$#" -ge 2 ] || { echo "ERROR: --mapping requires a CSV path."; exit 1; }
+            MAPPING_ARG="$2"
+            shift 2
+            ;;
+        --seg-only)
+            PATCH_MODE="seg-only"
+            shift
+            ;;
+        --resume)
+            RESUME_MODE="true"
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "ERROR: Unknown option: $1"
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+case "${SELECTION}" in
     all)
-        RUN_ID="pannet_all"
-        LIMIT_MODE="all"
+        RUN_MODE="single"
+        SELECTION_MODE="all"
+        BASE_RUN_ID="pannet_all"
+        ;;
+    representatives)
+        RUN_MODE="single"
+        SELECTION_MODE="representatives"
+        BASE_RUN_ID="pannet_representatives"
+        ;;
+    mapped)
+        RUN_MODE="mapped"
+        SELECTION_MODE="mapped"
+        BASE_RUN_ID="pannet_mapped"
         ;;
     *)
-        if [[ ! "${LIMIT_ARG}" =~ ^[1-9][0-9]*$ ]]; then
-            echo "ERROR: First argument must be 'all' or a positive integer."
-            echo "Bad value: ${LIMIT_ARG}"
+        if [[ ! "${SELECTION}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "ERROR: Selection must be all, N, representatives, or mapped."
             exit 1
         fi
-
-        RUN_ID="pannet_first_${LIMIT_ARG}"
-        LIMIT_MODE="limited"
+        RUN_MODE="single"
+        SELECTION_MODE="limited"
+        BASE_RUN_ID="pannet_first_${SELECTION}"
         ;;
 esac
 
+if [ "${RUN_MODE}" = "mapped" ]; then
+    if [ "${PRESET_NAME}" != "${DEFAULT_PRESET}" ]; then
+        echo "ERROR: --preset cannot be used with mapped mode."
+        exit 1
+    fi
+else
+    if [ -n "${MAPPING_ARG}" ]; then
+        echo "ERROR: --mapping can only be used with mapped mode."
+        exit 1
+    fi
+    if [[ "${PRESET_NAME}" == */* ]]; then
+        echo "ERROR: Pass only a preset filename from presets/."
+        exit 1
+    fi
+fi
+
+RUN_ID="${BASE_RUN_ID}"
+
+if [ "${RUN_MODE}" = "single" ] && [ "${PRESET_NAME}" != "${DEFAULT_PRESET}" ]; then
+    PRESET_TAG="${PRESET_NAME%.csv}"
+    PRESET_TAG="${PRESET_TAG#clam_pannet_}"
+    PRESET_TAG="${PRESET_TAG%_preset}"
+    PRESET_TAG="$(printf '%s' "${PRESET_TAG}" | tr -c 'A-Za-z0-9_-' '_')"
+    RUN_ID="${RUN_ID}_${PRESET_TAG}"
+fi
+
+if [ "${PATCH_MODE}" = "seg-only" ]; then
+    RUN_ID="${RUN_ID}_seg_only"
+fi
 
 RUN_DIR="${REPO_DIR}/runs/patching/${RUN_ID}"
 CONFIG_DIR="${RUN_DIR}/config"
@@ -71,229 +127,184 @@ RESULTS_DIR="${RUN_DIR}/results"
 
 PRESET_PATH="${CONFIG_DIR}/patching_preset.csv"
 PROCESS_LIST_PATH="${CONFIG_DIR}/process_list_input.csv"
+MAPPED_GROUPS_PATH="${CONFIG_DIR}/mapped_groups.tsv"
 
 cd "${REPO_DIR}"
 
+[ -d "${SOURCE_DIR}" ] || { echo "ERROR: Missing source directory: ${SOURCE_DIR}"; exit 1; }
+[ -f "${SBATCH_SCRIPT}" ] || { echo "ERROR: Missing sbatch script: ${SBATCH_SCRIPT}"; exit 1; }
 
-if [ ! -d "${SOURCE_DIR}" ]; then
-    echo "ERROR: PanNET slide directory does not exist:"
-    echo "${SOURCE_DIR}"
-    exit 1
-fi
-
-if [ ! -f "${SBATCH_SCRIPT}" ]; then
-    echo "ERROR: Slurm script does not exist:"
-    echo "${SBATCH_SCRIPT}"
-    exit 1
-fi
-
-
-# Read TIFF filenames safely, including spaces and '#' characters.
-# Selection order is deterministic lexicographic filename order.
-mapfile -d '' SLIDES < <(
-    find "${SOURCE_DIR}" \
-        -maxdepth 1 \
-        -type f \
+mapfile -d '' ALL_SLIDES < <(
+    find "${SOURCE_DIR}" -maxdepth 1 -type f \
         \( -iname '*.tif' -o -iname '*.tiff' \) \
-        -printf '%f\0' |
-        LC_ALL=C sort -z
+        -printf '%f\0' | LC_ALL=C sort -z
 )
 
-TOTAL_SLIDES="${#SLIDES[@]}"
-
-if [ "${TOTAL_SLIDES}" -eq 0 ]; then
-    echo "ERROR: No .tif or .tiff files found under:"
-    echo "${SOURCE_DIR}"
-    exit 1
-fi
-
+TOTAL_SLIDES="${#ALL_SLIDES[@]}"
+[ "${TOTAL_SLIDES}" -gt 0 ] || { echo "ERROR: No TIFF slides found."; exit 1; }
 
 CREATED_NEW_RUN="false"
 
 if [ "${RESUME_MODE}" = "true" ]; then
-    # Resume mode requires a previously created run.
-    if [ ! -d "${RUN_DIR}" ]; then
-        echo "ERROR: Cannot resume because the run directory does not exist:"
-        echo "${RUN_DIR}"
-        echo
-        echo "Create it first with:"
-        echo "  $0 ${LIMIT_ARG}"
-        exit 1
-    fi
+    [ -d "${RUN_DIR}" ] || { echo "ERROR: Run does not exist: ${RUN_DIR}"; exit 1; }
 
-    if [ ! -f "${PRESET_PATH}" ]; then
-        echo "ERROR: Existing run has no preset snapshot:"
-        echo "${PRESET_PATH}"
-        exit 1
-    fi
-
-    if [ ! -f "${PROCESS_LIST_PATH}" ]; then
-        echo "ERROR: Existing run has no input process list:"
-        echo "${PROCESS_LIST_PATH}"
-        exit 1
+    if [ "${RUN_MODE}" = "mapped" ]; then
+        [ -f "${MAPPED_GROUPS_PATH}" ] || { echo "ERROR: Missing mapped group snapshot."; exit 1; }
+        SLIDE_MAP="${CONFIG_DIR}/slide_preset_map.csv"
+        [ -f "${SLIDE_MAP}" ] || { echo "ERROR: Missing slide mapping snapshot."; exit 1; }
+        SELECTED_COUNT="$(( $(wc -l < "${SLIDE_MAP}") - 1 ))"
+    else
+        [ -s "${PRESET_PATH}" ] || { echo "ERROR: Missing preset snapshot."; exit 1; }
+        [ -f "${PROCESS_LIST_PATH}" ] || { echo "ERROR: Missing process-list snapshot."; exit 1; }
+        SELECTED_COUNT="$(( $(wc -l < "${PROCESS_LIST_PATH}") - 1 ))"
     fi
 
     mkdir -p "${LOG_DIR}" "${RESULTS_DIR}"
-
-    # Count slides from the existing process list. Do not regenerate it:
-    # the resume must use the exact original selection.
-    SELECTED_COUNT="$(
-        tail -n +2 "${PROCESS_LIST_PATH}" |
-        wc -l |
-        tr -d '[:space:]'
-    )"
-
-    EXISTING_PATCH_COUNT="$(
-        find "${RESULTS_DIR}/patches" \
-            -maxdepth 1 \
-            -type f \
-            -name '*.h5' \
-            2>/dev/null |
-        wc -l |
-        tr -d '[:space:]'
-    )"
-
-    # Preserve previous logs by selecting the next resume-log number.
-    RESUME_INDEX=1
-
-    while [ -e "${LOG_DIR}/job_resume_${RESUME_INDEX}.out" ] || \
-          [ -e "${LOG_DIR}/job_resume_${RESUME_INDEX}.err" ]; do
-        RESUME_INDEX=$((RESUME_INDEX + 1))
-    done
-
-    LOG_OUT="${LOG_DIR}/job_resume_${RESUME_INDEX}.out"
-    LOG_ERR="${LOG_DIR}/job_resume_${RESUME_INDEX}.err"
-
+    ATTEMPT_TAG="resume_$(date +%Y%m%d_%H%M%S)"
+    LOG_OUT="${LOG_DIR}/${ATTEMPT_TAG}.out"
+    LOG_ERR="${LOG_DIR}/${ATTEMPT_TAG}.err"
 else
-    # Default behavior: refuse to overwrite an existing run.
-    if [ -e "${RUN_DIR}" ]; then
-        echo "ERROR: Run directory already exists:"
-        echo "${RUN_DIR}"
-        echo
-        echo "Resume it with:"
-        echo "  $0 ${LIMIT_ARG} --resume"
-        echo
-        echo "Or remove it before creating a new run:"
-        echo "  rm -rf \"${RUN_DIR}\""
+    [ ! -e "${RUN_DIR}" ] || {
+        echo "ERROR: Run already exists: ${RUN_DIR}"
+        echo "Resume it with the same mode/options plus --resume."
         exit 1
-    fi
-
-    if [ ! -f "${BASE_PRESET_PATH}" ]; then
-        echo "ERROR: Patching preset does not exist:"
-        echo "${BASE_PRESET_PATH}"
-        exit 1
-    fi
-
-    if [ "${LIMIT_MODE}" = "all" ]; then
-        SELECTED_COUNT="${TOTAL_SLIDES}"
-    else
-        SELECTED_COUNT="${LIMIT_ARG}"
-
-        if (( SELECTED_COUNT > TOTAL_SLIDES )); then
-            echo "ERROR: Requested ${SELECTED_COUNT} slides, but only"
-            echo "${TOTAL_SLIDES} slides were found."
-            exit 1
-        fi
-    fi
+    }
 
     mkdir -p "${CONFIG_DIR}" "${LOG_DIR}" "${RESULTS_DIR}"
     CREATED_NEW_RUN="true"
 
-    # Preserve the exact preset used for this run.
-    cp "${BASE_PRESET_PATH}" "${PRESET_PATH}"
+    if [ "${RUN_MODE}" = "mapped" ]; then
+        [ -n "${MAPPING_ARG}" ] || {
+            echo "ERROR: New mapped runs require --mapping FILE.csv."
+            rm -rf "${RUN_DIR}"
+            exit 1
+        }
+        [ -x "${MAPPING_HELPER}" ] || {
+            echo "ERROR: Missing mapping helper: ${MAPPING_HELPER}"
+            rm -rf "${RUN_DIR}"
+            exit 1
+        }
 
-    # CLAM initializes missing segmentation and patching columns from
-    # the preset, so this list only needs slide_id and process.
-    {
-        echo "slide_id,process"
+        if [[ "${MAPPING_ARG}" = /* ]]; then
+            MAPPING_PATH="${MAPPING_ARG}"
+        else
+            MAPPING_PATH="${REPO_DIR}/${MAPPING_ARG}"
+        fi
 
-        for ((i = 0; i < SELECTED_COUNT; i++)); do
-            SLIDE_NAME="${SLIDES[$i]}"
+        if ! conda run --no-capture-output \
+            -n clam_latest_valar \
+            python "${MAPPING_HELPER}" \
+            --source-dir "${SOURCE_DIR}" \
+            --case-map "${MAPPING_PATH}" \
+            --presets-dir "${REPO_DIR}/presets" \
+            --config-dir "${CONFIG_DIR}"; then
 
-            # Escape embedded double quotes according to CSV rules.
-            ESCAPED_SLIDE_NAME="${SLIDE_NAME//\"/\"\"}"
+            rm -rf "${RUN_DIR}"
+            exit 1
+        fi
 
-            printf '"%s",1\n' "${ESCAPED_SLIDE_NAME}"
-        done
-    } > "${PROCESS_LIST_PATH}"
+        SELECTED_COUNT="$(( $(wc -l < "${CONFIG_DIR}/slide_preset_map.csv") - 1 ))"
+    else
+        BASE_PRESET_PATH="${REPO_DIR}/presets/${PRESET_NAME}"
+        [ -s "${BASE_PRESET_PATH}" ] || {
+            echo "ERROR: Preset is missing or empty: ${BASE_PRESET_PATH}"
+            rm -rf "${RUN_DIR}"
+            exit 1
+        }
 
-    EXISTING_PATCH_COUNT="0"
+        SELECTED_SLIDES=()
+
+        case "${SELECTION_MODE}" in
+            all)
+                SELECTED_SLIDES=("${ALL_SLIDES[@]}")
+                ;;
+            limited)
+                COUNT="$((10#${SELECTION}))"
+                if (( COUNT > TOTAL_SLIDES )); then
+                    echo "ERROR: Requested ${COUNT}; found ${TOTAL_SLIDES}."
+                    rm -rf "${RUN_DIR}"
+                    exit 1
+                fi
+                SELECTED_SLIDES=("${ALL_SLIDES[@]:0:COUNT}")
+                ;;
+            representatives)
+                declare -A REPRESENTATIVE
+                declare -A REPRESENTATIVE_NUMBER
+
+                for SLIDE_NAME in "${ALL_SLIDES[@]}"; do
+                    if [[ ! "${SLIDE_NAME}" =~ ^#([0-9]+)-([0-9]+)[[:space:]] ]]; then
+                        echo "ERROR: Unexpected filename: ${SLIDE_NAME}"
+                        rm -rf "${RUN_DIR}"
+                        exit 1
+                    fi
+
+                    CASE_ID="$((10#${BASH_REMATCH[1]}))"
+                    SLIDE_NUMBER="$((10#${BASH_REMATCH[2]}))"
+
+                    if [[ -z "${REPRESENTATIVE[${CASE_ID}]+x}" ]] || \
+                       (( SLIDE_NUMBER < REPRESENTATIVE_NUMBER[${CASE_ID}] )); then
+                        REPRESENTATIVE["${CASE_ID}"]="${SLIDE_NAME}"
+                        REPRESENTATIVE_NUMBER["${CASE_ID}"]="${SLIDE_NUMBER}"
+                    fi
+                done
+
+                mapfile -t CASE_IDS < <(printf '%s\n' "${!REPRESENTATIVE[@]}" | sort -n)
+                for CASE_ID in "${CASE_IDS[@]}"; do
+                    SELECTED_SLIDES+=("${REPRESENTATIVE[${CASE_ID}]}")
+                done
+                ;;
+        esac
+
+        SELECTED_COUNT="${#SELECTED_SLIDES[@]}"
+        cp "${BASE_PRESET_PATH}" "${PRESET_PATH}"
+
+        {
+            echo "slide_id,process"
+            for SLIDE_NAME in "${SELECTED_SLIDES[@]}"; do
+                ESCAPED="${SLIDE_NAME//\"/\"\"}"
+                printf '"%s",1\n' "${ESCAPED}"
+            done
+        } > "${PROCESS_LIST_PATH}"
+    fi
+
+    cat > "${CONFIG_DIR}/patching_config.txt" <<EOF
+RUN_ID=${RUN_ID}
+RUN_MODE=${RUN_MODE}
+SELECTION=${SELECTION}
+PATCH_MODE=${PATCH_MODE}
+SELECTED_SLIDES=${SELECTED_COUNT}
+EOF
+
+    ATTEMPT_TAG="job"
     LOG_OUT="${LOG_DIR}/job.out"
     LOG_ERR="${LOG_DIR}/job.err"
 fi
 
+export RUN_ID RUN_MODE REPO_DIR SOURCE_DIR RESULTS_DIR CONFIG_DIR LOG_DIR
+export PRESET_PATH PROCESS_LIST_PATH MAPPED_GROUPS_PATH
+export PATCH_MODE RESUME_MODE ATTEMPT_TAG
 
-# Export the paths required by the Slurm job.
-export RUN_ID
-export REPO_DIR
-export SOURCE_DIR
-export RESULTS_DIR
-export PRESET_PATH
-export PROCESS_LIST_PATH
-
-
-if [ "${RESUME_MODE}" = "true" ]; then
-    echo "Resuming bulk CLAM patching run"
-else
-    echo "Submitting new bulk CLAM patching run"
-fi
-
+echo "Submitting CLAM patching job"
+echo "Run ID:          ${RUN_ID}"
+echo "Run mode:        ${RUN_MODE}"
+echo "Patching mode:   ${PATCH_MODE}"
+echo "Selected slides: ${SELECTED_COUNT}"
+echo "Results:         ${RESULTS_DIR}"
 echo
-echo "Run ID:               ${RUN_ID}"
-echo "Mode:                 $(
-    if [ "${RESUME_MODE}" = "true" ]; then
-        echo "resume"
-    else
-        echo "new"
-    fi
-)"
-echo "Source directory:     ${SOURCE_DIR}"
-echo "Available slides:     ${TOTAL_SLIDES}"
-echo "Selected slides:      ${SELECTED_COUNT}"
-echo "Existing patch H5s:   ${EXISTING_PATCH_COUNT}"
-echo "Preset snapshot:      ${PRESET_PATH}"
-echo "Input process list:   ${PROCESS_LIST_PATH}"
-echo "Results directory:    ${RESULTS_DIR}"
-echo "Standard-output log:  ${LOG_OUT}"
-echo "Standard-error log:   ${LOG_ERR}"
-echo
-echo "First selected slides:"
-head -n 6 "${PROCESS_LIST_PATH}"
-echo
-
 
 if ! SUBMIT_OUTPUT="$(
-    sbatch \
-        --export=ALL \
-        --output="${LOG_OUT}" \
-        --error="${LOG_ERR}" \
-        "${SBATCH_SCRIPT}"
+    sbatch --export=ALL --output="${LOG_OUT}" --error="${LOG_ERR}" "${SBATCH_SCRIPT}"
 )"; then
     echo "ERROR: Slurm submission failed."
-
     if [ "${CREATED_NEW_RUN}" = "true" ]; then
-        echo "Removing newly created, unsubmitted run directory:"
-        echo "${RUN_DIR}"
         rm -rf "${RUN_DIR}"
-    else
-        echo "The existing resumed run directory has been preserved:"
-        echo "${RUN_DIR}"
     fi
-
     exit 1
 fi
 
-
 echo "${SUBMIT_OUTPUT}"
-
 JOB_ID="${SUBMIT_OUTPUT##* }"
-
 echo
-echo "Monitor queue:"
-echo "  squeue -j ${JOB_ID}"
-echo
-echo "Follow output:"
-echo "  tail -f \"${LOG_OUT}\""
-echo
-echo "Follow errors:"
-echo "  tail -f \"${LOG_ERR}\""
+echo "Monitor: squeue -j ${JOB_ID}"
+echo "Logs:    tail -f \"${LOG_OUT}\""
+echo "Errors:  tail -f \"${LOG_ERR}\""
