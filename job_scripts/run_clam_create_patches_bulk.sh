@@ -15,7 +15,7 @@ LIMIT_ARG="$1"
 REPO_DIR="/home/hpc-oalkaya/repos/CLAM"
 SOURCE_DIR="/userfiles/cgunduz/new_datasets/pannet_dataset/IPS/PANNET Slides"
 
-BASE_PRESET_PATH="${REPO_DIR}/job_scripts/clam_pannet_preset.csv"
+BASE_PRESET_PATH="${REPO_DIR}/presets/clam_pannet_preset.csv"
 SBATCH_SCRIPT="${REPO_DIR}/job_scripts/clam_create_patches_bulk.sbatch"
 
 # Interpret the single argument and determine the run name.

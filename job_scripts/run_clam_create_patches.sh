@@ -31,7 +31,7 @@ REPO_DIR="/home/hpc-oalkaya/repos/CLAM"
 SLIDE_DIR="/userfiles/cgunduz/new_datasets/pannet_dataset/IPS/PANNET Slides"
 
 # The shared preset edited manually between experiments.
-BASE_PRESET_PATH="${REPO_DIR}/job_scripts/clam_pannet_preset.csv"
+BASE_PRESET_PATH="${REPO_DIR}/presets/clam_pannet_preset.csv"
 
 ORIG_SLIDE="${SLIDE_DIR}/${SLIDE_NAME}"
 
