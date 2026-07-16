@@ -19,17 +19,26 @@ fi
 
 REPO_DIR="/home/hpc-oalkaya/repos/CLAM"
 
+module load conda3/latest
+
+PYTHON_CMD=(
+    conda run
+    --no-capture-output
+    -n clam_latest_valar
+    python
+)
+
 DATASET_CSV="${REPO_DIR}/dataset_csv/pannet_wsi_grade.csv"
 
-SPLIT_NAME="task_pannet_grade"
+SPLIT_NAME="task_pannet_grade_k10"
 SPLIT_DIR="${REPO_DIR}/splits/${SPLIT_NAME}"
 
 FEATURE_RUN_DIR="${REPO_DIR}/runs/feature_extraction/${FEATURE_RUN_ID}"
 FEATURE_DIR="${FEATURE_RUN_DIR}/results"
 PT_DIR="${FEATURE_DIR}/pt_files"
 
-MODEL_TYPE="clam_sb"
-EMBED_DIM="1024"
+MODEL_TYPE="clam_mb"
+EMBED_DIM="2560"
 K_FOLDS="10"
 SEED="1"
 
@@ -94,7 +103,7 @@ if [ -e "${RUN_DIR}" ]; then
 fi
 
 # Confirm that every slide in the dataset has a matching feature bag.
-python - "${DATASET_CSV}" "${PT_DIR}" <<'PY'
+"${PYTHON_CMD[@]}" - "${DATASET_CSV}" "${PT_DIR}" <<'PY'
 import sys
 from pathlib import Path
 

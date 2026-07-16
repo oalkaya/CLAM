@@ -22,3 +22,4 @@ dependencies:
       - openslide-bin
       - git+https://github.com/oval-group/smooth-topk.git
       - tensorboardX
+      - future

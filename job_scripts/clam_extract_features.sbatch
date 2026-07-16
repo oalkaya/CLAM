@@ -1,8 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=clam_extract_features
 #SBATCH --partition=ai
-#SBATCH --account=ai
-#SBATCH --qos=ai
+##SBATCH --nodelist=ai[15-35],star[01-04]
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8

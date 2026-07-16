@@ -47,7 +47,7 @@ PATCHES_DIR="${DATA_H5_DIR}/patches"
 
 # Feature-extraction settings.
 MODEL_NAME="resnet50_trunc"
-BATCH_SIZE="256"
+BATCH_SIZE="1024" # Around 14GB fits on T4 GPU
 TARGET_PATCH_SIZE="224"
 SLIDE_EXT=".tiff"
 

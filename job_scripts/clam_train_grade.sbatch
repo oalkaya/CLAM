@@ -121,16 +121,16 @@ python -u main.py \
     --k "${K_FOLDS}" \
     --seed "${SEED}" \
     --max_epochs 200 \
-    --drop_out 0.25 \
+    --drop_out 0.35 \
     --early_stopping \
-    --lr 2e-4 \
-    --reg 1e-5 \
+    --lr 5e-5 \
+    --reg 1e-4 \
     --weighted_sample \
     --bag_loss ce \
-    --inst_loss svm \
-    --bag_weight 0.7 \
+    --inst_loss ce \
+    --bag_weight 0.8 \
     --B 8 \
-    --subtyping \
+    # --subtyping \
     --log_data
 
 echo
