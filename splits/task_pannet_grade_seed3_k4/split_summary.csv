@@ -1,0 +1,5 @@
+seed,fold,train_groups,val_groups,test_groups,train_slides,val_slides,test_slides,test_A_groups,test_B_groups,test_C_groups
+3,0,50,7,16,165,21,48,3,5,8
+3,1,51,7,15,171,21,45,3,4,8
+3,2,51,7,15,173,21,45,3,5,7
+3,3,51,7,15,163,21,45,3,5,7

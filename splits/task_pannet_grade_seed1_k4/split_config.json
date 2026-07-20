@@ -1,0 +1,28 @@
+{
+  "task": "pannet",
+  "task_name": "task_pannet_grade",
+  "dataset_csv": "dataset_csv/pannet_wsi_grade.csv",
+  "group_col": "case_id",
+  "slide_col": "slide_id",
+  "stratify_col": "ips",
+  "k": 4,
+  "seed": 1,
+  "val_frac": 0.15,
+  "eligible_groups": 61,
+  "train_only_ineligible_groups": 12,
+  "label_order": [
+    "A",
+    "B",
+    "C"
+  ],
+  "required_eval_slide_numbers": [
+    1,
+    2,
+    3
+  ],
+  "val_test_slide_numbers": [
+    1,
+    2,
+    3
+  ]
+}
