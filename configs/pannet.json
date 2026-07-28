@@ -73,6 +73,7 @@
     "drop_out": 0.5,
     "early_stopping": true,
     "training_seed": 1,
+    "slurm_jobs": 5,
     "lr": 0.00005,
     "reg": 0.0001,
     "weighted_sample": true,
@@ -109,7 +110,8 @@
       "partition": "ai",
       "account": "ai",
       "qos": "ai",
-      "exclude_nodes": "ai11,ai12,ai13,ai14"
+      "exclude_nodes": "ai11,ai12,ai13,ai14",
+      "max_submitted_jobs_per_user": 5
     }
   }
 }

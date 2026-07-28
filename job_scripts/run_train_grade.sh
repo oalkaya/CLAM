@@ -2,13 +2,15 @@
 set -euo pipefail
 
 usage() {
-    echo "Usage: $0 --config configs/pannet.json"
+    echo "Usage: $0 --config configs/pannet.json [--jobs N]"
 }
 
 CONFIG_PATH=""
+JOB_COUNT_OVERRIDE=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --config) CONFIG_PATH="$2"; shift 2 ;;
+        --jobs) JOB_COUNT_OVERRIDE="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "ERROR: Unknown option: $1"; usage; exit 1 ;;
     esac
@@ -60,6 +62,7 @@ q("MAX_EPOCHS", int(tr.get("max_epochs", 200)))
 q("DROP_OUT", tr.get("drop_out", 0.25))
 b("EARLY_STOPPING", tr.get("early_stopping", False))
 q("TRAINING_SEED", int(tr.get("training_seed", 1)))
+q("DEFAULT_JOB_COUNT", int(tr.get("slurm_jobs", 1)))
 q("LR", tr.get("lr", 1e-4))
 q("REG", tr.get("reg", 1e-5))
 b("WEIGHTED_SAMPLE", tr.get("weighted_sample", False))
@@ -75,6 +78,7 @@ q("SLURM_PARTITION", slurm.get("partition", "ai"))
 q("SLURM_ACCOUNT", slurm.get("account", "ai"))
 q("SLURM_QOS", slurm.get("qos", "ai"))
 q("SLURM_EXCLUDE", slurm.get("exclude_nodes", ""))
+q("QOS_MAX_JOBS", int(slurm.get("max_submitted_jobs_per_user", 0)))
 PY
 )
 
@@ -127,6 +131,16 @@ PY
 )"
 [ "${FOLD_COUNT}" -gt 0 ] || { echo "ERROR: No LOPO folds found."; exit 1; }
 
+JOB_COUNT="${JOB_COUNT_OVERRIDE:-${DEFAULT_JOB_COUNT}}"
+if [[ ! "${JOB_COUNT}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: --jobs must be a positive integer."
+    exit 1
+fi
+if (( JOB_COUNT > FOLD_COUNT )); then
+    echo "ERROR: Requested ${JOB_COUNT} jobs for only ${FOLD_COUNT} folds."
+    exit 1
+fi
+
 for ((fold = 0; fold < FOLD_COUNT; fold++)); do
     [ -f "${SPLIT_DIR}/splits_${fold}.csv" ] || {
         echo "ERROR: Missing ${SPLIT_DIR}/splits_${fold}.csv"
@@ -154,8 +168,6 @@ SBATCH_ARGS=(
     --partition="${SLURM_PARTITION}"
     --account="${SLURM_ACCOUNT}"
     --qos="${SLURM_QOS}"
-    --output="${LOG_DIR}/training_%j.out"
-    --error="${LOG_DIR}/training_%j.err"
 )
 if [ -n "${SLURM_EXCLUDE}" ]; then
     SBATCH_ARGS+=(--exclude="${SLURM_EXCLUDE}")
@@ -174,5 +186,39 @@ echo "Splits:        ${SPLIT_DIR}"
 echo "Feature bags:  ${FEATURES_DIR}"
 echo "Run directory: ${RUN_DIR}"
 echo "Completed:     ${COMPLETED_FOLDS}/${FOLD_COUNT} folds"
+echo "Worker jobs:   ${JOB_COUNT}"
 
-sbatch "${SBATCH_ARGS[@]}" "${SCRIPT_DIR}/train_grade.sbatch"
+if (( QOS_MAX_JOBS > 0 )); then
+    CURRENT_JOBS="$(
+        squeue --noheader --user="${USER}" --format="%i" | wc -l | tr -d '[:space:]'
+    )"
+    AVAILABLE_JOBS=$((QOS_MAX_JOBS - CURRENT_JOBS))
+    if (( JOB_COUNT > AVAILABLE_JOBS )); then
+        echo "ERROR: Requested ${JOB_COUNT} jobs, but only ${AVAILABLE_JOBS} of"
+        echo "       ${QOS_MAX_JOBS} configured user job slots are currently available."
+        echo "       Current queued/running jobs: ${CURRENT_JOBS}"
+        exit 1
+    fi
+fi
+
+SUBMITTED_JOB_IDS=()
+for ((worker = 0; worker < JOB_COUNT; worker++)); do
+    export WORKER_INDEX="${worker}"
+    export WORKER_COUNT="${JOB_COUNT}"
+    if ! SUBMIT_OUTPUT="$(
+        sbatch \
+            "${SBATCH_ARGS[@]}" \
+            --job-name="clam_lopo_w${worker}" \
+            --output="${LOG_DIR}/worker_${worker}_%j.out" \
+            --error="${LOG_DIR}/worker_${worker}_%j.err" \
+            "${SCRIPT_DIR}/train_grade.sbatch"
+    )"; then
+        echo "ERROR: Failed to submit worker ${worker}."
+        echo "Already submitted job IDs: ${SUBMITTED_JOB_IDS[*]:-(none)}"
+        exit 1
+    fi
+    echo "${SUBMIT_OUTPUT}"
+    SUBMITTED_JOB_IDS+=("${SUBMIT_OUTPUT##* }")
+done
+
+echo "Submitted worker job IDs: ${SUBMITTED_JOB_IDS[*]}"

@@ -92,6 +92,10 @@ def validate_config(config: dict[str, Any]) -> None:
                 "for stratified validation."
             )
 
+    slurm_jobs = int(config.get("training", {}).get("slurm_jobs", 1))
+    if slurm_jobs < 1:
+        raise ValueError("training.slurm_jobs must be a positive integer.")
+
     aggregation = config.get("evaluation", {}).get("aggregation")
     if aggregation is not None:
         aggregation_type = require(config, "evaluation.aggregation.type")

@@ -13,7 +13,7 @@ required_vars=(
     REPO_DIR DATASET_CSV PATIENT_ID_COL SLIDE_ID_COL LABEL_COL LABEL_VALUES_JSON
     SPLIT_DIR FEATURES_DIR RESULTS_DIR FOLD_COUNT MODEL_TYPE EMBED_DIM MAX_EPOCHS DROP_OUT
     EARLY_STOPPING TRAINING_SEED LR REG WEIGHTED_SAMPLE BAG_LOSS INST_LOSS BAG_WEIGHT B_VALUE
-    SUBTYPING LOG_DATA CONDA_MODULE CONDA_ENV
+    SUBTYPING LOG_DATA CONDA_MODULE CONDA_ENV WORKER_INDEX WORKER_COUNT
 )
 for var in "${required_vars[@]}"; do
     [ -n "${!var:-}" ] || { echo "ERROR: Required variable ${var} is not set."; exit 1; }
@@ -39,9 +39,9 @@ print("CUDA:", torch.version.cuda)
 print("GPU:", torch.cuda.get_device_name(0))
 PY
 
-echo "Running ${FOLD_COUNT} LOPO folds sequentially in Slurm job ${SLURM_JOB_ID}."
+echo "LOPO worker ${WORKER_INDEX}/${WORKER_COUNT} in Slurm job ${SLURM_JOB_ID}."
 
-for ((fold = 0; fold < FOLD_COUNT; fold++)); do
+for ((fold = WORKER_INDEX; fold < FOLD_COUNT; fold += WORKER_COUNT)); do
     result_path="${RESULTS_DIR}/split_${fold}_results.pkl"
     if [ -f "${result_path}" ]; then
         echo "Skipping completed fold ${fold}: ${result_path}"
@@ -87,4 +87,4 @@ for ((fold = 0; fold < FOLD_COUNT; fold++)); do
 done
 
 echo
-echo "All LOPO folds completed: $(date)"
+echo "LOPO worker ${WORKER_INDEX} completed its assigned folds: $(date)"

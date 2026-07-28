@@ -48,17 +48,15 @@ class Accuracy_Logger(object):
 
 class EarlyStopping:
     """Early stops the training if validation loss doesn't improve after a given patience."""
-    def __init__(self, patience=20, stop_epoch=50, verbose=False):
+    def __init__(self, patience=20, verbose=False):
         """
         Args:
             patience (int): How long to wait after last time validation loss improved.
                             Default: 20
-            stop_epoch (int): Earliest epoch possible for stopping
             verbose (bool): If True, prints a message for each validation loss improvement. 
                             Default: False
         """
         self.patience = patience
-        self.stop_epoch = stop_epoch
         self.verbose = verbose
         self.counter = 0
         self.best_score = None
@@ -75,7 +73,7 @@ class EarlyStopping:
         elif score < self.best_score:
             self.counter += 1
             print(f'EarlyStopping counter: {self.counter} out of {self.patience}')
-            if self.counter >= self.patience and epoch > self.stop_epoch:
+            if self.counter >= self.patience:
                 self.early_stop = True
         else:
             self.best_score = score
@@ -181,7 +179,7 @@ def train(datasets, cur, args):
     if args.early_stopping and val_loader is None:
         raise ValueError("Early stopping requires a non-empty validation split.")
     if args.early_stopping:
-        early_stopping = EarlyStopping(patience = 20, stop_epoch=50, verbose = True)
+        early_stopping = EarlyStopping(patience=20, verbose=True)
 
     else:
         early_stopping = None
