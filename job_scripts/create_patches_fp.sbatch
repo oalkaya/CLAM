@@ -15,7 +15,7 @@ set -euo pipefail
 required_vars=(
     RUN_ID RUN_MODE REPO_DIR SOURCE_DIR RESULTS_DIR CONFIG_DIR LOG_DIR
     PATCH_MODE PRESET_PATH PROCESS_LIST_PATH MAPPED_GROUPS_PATH
-    PATCH_SIZE STEP_SIZE PATCH_LEVEL
+    PATCH_SIZE STEP_SIZE PATCH_LEVEL CONDA_MODULE CONDA_ENV
 )
 
 for var in "${required_vars[@]}"; do
@@ -26,7 +26,7 @@ case "${RUN_MODE}" in single|mapped) ;; *) echo "ERROR: Unknown RUN_MODE: ${RUN_
 case "${PATCH_MODE}" in full|seg-only) ;; *) echo "ERROR: Unknown PATCH_MODE: ${PATCH_MODE}"; exit 1 ;; esac
 
 module purge
-module load conda3/latest
+module load "${CONDA_MODULE}"
 source "$(conda info --base)/etc/profile.d/conda.sh"
 
 while [ "${CONDA_SHLVL:-0}" -gt 0 ]; do
@@ -34,7 +34,7 @@ while [ "${CONDA_SHLVL:-0}" -gt 0 ]; do
 done
 
 unset PYTHONPATH PYTHONHOME
-conda activate clam_latest_valar
+conda activate "${CONDA_ENV}"
 hash -r
 
 cd "${REPO_DIR}"

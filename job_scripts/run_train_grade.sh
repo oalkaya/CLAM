@@ -2,76 +2,27 @@
 set -euo pipefail
 
 usage() {
-    echo "Usage:"
-    echo "  $0 --config configs/pannet_k4.json [options]"
-    echo
-    echo "Options:"
-    echo "  --feature-run-id RUN_ID   Override training.feature_run_id"
-    echo "  --split-seed N            Split seed, default first seed from config"
-    echo "  --train-seed N            Training seed, default same as split seed"
-    echo "  --model-type TYPE         Override training.model_type"
-    echo "  --run-id RUN_ID           Optional custom training run id"
+    echo "Usage: $0 --config configs/pannet.json"
 }
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-
 CONFIG_PATH=""
-FEATURE_RUN_ID_OVERRIDE=""
-SPLIT_SEED_OVERRIDE=""
-TRAIN_SEED_OVERRIDE=""
-MODEL_TYPE_OVERRIDE=""
-CUSTOM_RUN_ID=""
-
-CONDA_MODULE="${CONDA_MODULE:-conda3/latest}"
-CONDA_ENV="${CONDA_ENV:-clam_latest_valar}"
-
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --config)
-            CONFIG_PATH="$2"
-            shift 2
-            ;;
-        --feature-run-id)
-            FEATURE_RUN_ID_OVERRIDE="$2"
-            shift 2
-            ;;
-        --split-seed)
-            SPLIT_SEED_OVERRIDE="$2"
-            shift 2
-            ;;
-        --train-seed)
-            TRAIN_SEED_OVERRIDE="$2"
-            shift 2
-            ;;
-        --model-type)
-            MODEL_TYPE_OVERRIDE="$2"
-            shift 2
-            ;;
-        --run-id)
-            CUSTOM_RUN_ID="$2"
-            shift 2
-            ;;
-        -h|--help)
-            usage
-            exit 0
-            ;;
-        *)
-            echo "ERROR: Unknown option: $1"
-            usage
-            exit 1
-            ;;
+        --config) CONFIG_PATH="$2"; shift 2 ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "ERROR: Unknown option: $1"; usage; exit 1 ;;
     esac
 done
 
 [ -n "${CONFIG_PATH}" ] || { echo "ERROR: --config is required."; exit 1; }
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_DIR}"
 
 if [[ "${CONFIG_PATH}" != /* ]]; then
     CONFIG_PATH="${REPO_DIR}/${CONFIG_PATH}"
 fi
-
 [ -f "${CONFIG_PATH}" ] || { echo "ERROR: Missing config: ${CONFIG_PATH}"; exit 1; }
 
 readarray -t CFG_LINES < <(
@@ -82,53 +33,49 @@ import sys
 from pathlib import Path
 
 cfg = json.loads(Path(sys.argv[1]).read_text())
-tr = cfg.get("training", {})
-
-dataset_name = cfg.get("dataset_name")
-dataset_csv = cfg.get("dataset_csv")
-k = cfg.get("k")
-seeds = cfg.get("seeds", [])
-
-if not dataset_name:
-    raise SystemExit("Config missing required field: dataset_name")
-if not dataset_csv:
-    raise SystemExit("Config missing required field: dataset_csv")
-if not k:
-    raise SystemExit("Config missing required field: k")
-if not seeds:
-    raise SystemExit("Config missing required field: seeds")
-if not tr.get("feature_run_id"):
-    raise SystemExit("Config missing required field: training.feature_run_id")
+ds = cfg["dataset"]
+sp = cfg["splits"]
+tr = cfg["training"]
+rt = cfg.get("runtime", {})
+slurm = rt.get("slurm", {})
 
 def q(name, value):
     print(f"{name}=" + shlex.quote(str(value)))
 
 def b(name, value):
-    print(f"{name}=" + ("true" if bool(value) else "false"))
+    q(name, "true" if bool(value) else "false")
 
-q("DATASET_NAME", dataset_name)
-q("DATASET_CSV_CONFIG", dataset_csv)
-q("K_FOLDS", int(k))
-q("FIRST_SEED", int(seeds[0]))
-
-q("DEFAULT_FEATURE_RUN_ID", tr.get("feature_run_id"))
-q("TASK_NAME", tr.get("task", f"task_{dataset_name}_grade"))
-q("SPLIT_NAME_TEMPLATE", tr.get("split_name_template", f"task_{dataset_name}_grade_seed{{split_seed}}_k{{k}}"))
-
-q("DEFAULT_MODEL_TYPE", tr.get("model_type", "clam_mb"))
-q("EMBED_DIM", int(tr.get("embed_dim", 2560)))
+q("DATASET_NAME", ds["name"])
+q("DATASET_CSV", ds["metadata_csv"])
+q("PATIENT_ID_COL", ds["patient_id_column"])
+q("SLIDE_ID_COL", ds["slide_id_column"])
+q("LABEL_COL", ds["slide_label"]["column"])
+q("LABEL_VALUES_JSON", json.dumps(ds["slide_label"]["values"], separators=(",", ":")))
+q("SPLIT_DIR", sp["directory"])
+q("FEATURES_DIR", tr["feature_bags_dir"])
+q("RUN_DIR", tr["run_directory"])
+q("MODEL_TYPE", tr.get("model_type", "clam_mb"))
+q("EMBED_DIM", int(tr.get("embed_dim", 1024)))
 q("MAX_EPOCHS", int(tr.get("max_epochs", 200)))
-q("DROP_OUT", tr.get("drop_out", 0.5))
-b("EARLY_STOPPING", tr.get("early_stopping", True))
-q("LR", tr.get("lr", 5e-5))
-q("REG", tr.get("reg", 1e-4))
-b("WEIGHTED_SAMPLE", tr.get("weighted_sample", True))
+q("DROP_OUT", tr.get("drop_out", 0.25))
+b("EARLY_STOPPING", tr.get("early_stopping", False))
+q("TRAINING_SEED", int(tr.get("training_seed", 1)))
+q("MAX_PARALLEL_FOLDS", int(tr.get("max_parallel_folds", 1)))
+q("LR", tr.get("lr", 1e-4))
+q("REG", tr.get("reg", 1e-5))
+b("WEIGHTED_SAMPLE", tr.get("weighted_sample", False))
 q("BAG_LOSS", tr.get("bag_loss", "ce"))
 q("INST_LOSS", tr.get("inst_loss", "ce"))
-q("BAG_WEIGHT", tr.get("bag_weight", 0.9))
+q("BAG_WEIGHT", tr.get("bag_weight", 0.7))
 q("B_VALUE", int(tr.get("B", 8)))
 b("SUBTYPING", tr.get("subtyping", False))
-b("LOG_DATA", tr.get("log_data", True))
+b("LOG_DATA", tr.get("log_data", False))
+q("CONDA_MODULE", rt.get("conda_module", "conda3/latest"))
+q("CONDA_ENV", rt.get("conda_environment", "clam_latest_valar"))
+q("SLURM_PARTITION", slurm.get("partition", "ai"))
+q("SLURM_ACCOUNT", slurm.get("account", "ai"))
+q("SLURM_QOS", slurm.get("qos", "ai"))
+q("SLURM_EXCLUDE", slurm.get("exclude_nodes", ""))
 PY
 )
 
@@ -136,50 +83,60 @@ for line in "${CFG_LINES[@]}"; do
     eval "${line}"
 done
 
-FEATURE_RUN_ID="${FEATURE_RUN_ID_OVERRIDE:-${DEFAULT_FEATURE_RUN_ID}}"
-SPLIT_SEED="${SPLIT_SEED_OVERRIDE:-${FIRST_SEED}}"
-TRAIN_SEED="${TRAIN_SEED_OVERRIDE:-${SPLIT_SEED}}"
-MODEL_TYPE="${MODEL_TYPE_OVERRIDE:-${DEFAULT_MODEL_TYPE}}"
-
-if [[ "${FEATURE_RUN_ID}" == */* ]]; then
-    echo "ERROR: Pass only the feature-extraction run folder name."
-    echo "Bad value: ${FEATURE_RUN_ID}"
+[ "${EARLY_STOPPING}" = "false" ] || {
+    echo "ERROR: Exact LOPO has no validation set; training.early_stopping must be false."
     exit 1
-fi
-
-DATASET_CSV="${REPO_DIR}/${DATASET_CSV_CONFIG}"
-
-SPLIT_NAME="${SPLIT_NAME_TEMPLATE//\{split_seed\}/${SPLIT_SEED}}"
-SPLIT_NAME="${SPLIT_NAME//\{train_seed\}/${TRAIN_SEED}}"
-SPLIT_NAME="${SPLIT_NAME//\{seed\}/${SPLIT_SEED}}"
-SPLIT_NAME="${SPLIT_NAME//\{k\}/${K_FOLDS}}"
-
-SPLIT_DIR="${REPO_DIR}/splits/${SPLIT_NAME}"
-
-FEATURE_RUN_DIR="${REPO_DIR}/runs/feature_extraction/${FEATURE_RUN_ID}"
-FEATURE_DIR="${FEATURE_RUN_DIR}/results"
-PT_DIR="${FEATURE_DIR}/pt_files"
-
-EXP_CODE="${DATASET_NAME}_grade_${MODEL_TYPE}_cv${K_FOLDS}_split${SPLIT_SEED}_train${TRAIN_SEED}"
-BASE_RUN_ID="${FEATURE_RUN_ID}_${EXP_CODE}"
-RUN_ID="${CUSTOM_RUN_ID:-${BASE_RUN_ID}}"
-RUN_ID="$(printf '%s' "${RUN_ID}" | tr '/' '_')"
-
-RUN_DIR="${REPO_DIR}/runs/training/${RUN_ID}"
-CONFIG_DIR="${RUN_DIR}/config"
-LOG_DIR="${RUN_DIR}/logs"
-RESULTS_ROOT="${RUN_DIR}/results"
-
-SBATCH_SCRIPT="${REPO_DIR}/job_scripts/train_grade.sbatch"
-
+}
 [ -f "${DATASET_CSV}" ] || { echo "ERROR: Missing dataset CSV: ${DATASET_CSV}"; exit 1; }
+[ -d "${FEATURES_DIR}" ] || { echo "ERROR: Missing feature bags: ${FEATURES_DIR}"; exit 1; }
 [ -d "${SPLIT_DIR}" ] || { echo "ERROR: Missing split directory: ${SPLIT_DIR}"; exit 1; }
-[ -d "${PT_DIR}" ] || { echo "ERROR: Missing feature PT directory: ${PT_DIR}"; exit 1; }
-[ -f "${SBATCH_SCRIPT}" ] || { echo "ERROR: Missing sbatch script: ${SBATCH_SCRIPT}"; exit 1; }
+[ -f "${SPLIT_DIR}/fold_manifest.csv" ] || {
+    echo "ERROR: Missing ${SPLIT_DIR}/fold_manifest.csv; run the splits operation first."
+    exit 1
+}
 
-for ((fold = 0; fold < K_FOLDS; fold++)); do
-    SPLIT_FILE="${SPLIT_DIR}/splits_${fold}.csv"
-    [ -f "${SPLIT_FILE}" ] || { echo "ERROR: Missing split file: ${SPLIT_FILE}"; exit 1; }
+python - "${DATASET_CSV}" "${FEATURES_DIR}" "${SLIDE_ID_COL}" <<'PY'
+import sys
+from pathlib import Path
+import pandas as pd
+
+metadata_path, features_path, slide_column = sys.argv[1:]
+metadata = pd.read_csv(metadata_path, dtype={slide_column: str})
+if slide_column not in metadata:
+    raise SystemExit(f"Metadata is missing slide ID column {slide_column!r}.")
+
+features_dir = Path(features_path)
+missing = [
+    features_dir / f"{slide_id}.pt"
+    for slide_id in metadata[slide_column].astype(str).str.strip()
+    if not (features_dir / f"{slide_id}.pt").is_file()
+]
+if missing:
+    preview = "\n".join(str(path) for path in missing[:20])
+    raise SystemExit(
+        f"Missing {len(missing)} feature bags. First missing files:\n{preview}"
+    )
+print(f"Validated {len(metadata)} feature bags.")
+PY
+
+FOLD_COUNT="$(
+python - "${SPLIT_DIR}/fold_manifest.csv" <<'PY'
+import pandas as pd
+import sys
+
+df = pd.read_csv(sys.argv[1])
+if list(df["fold"]) != list(range(len(df))):
+    raise SystemExit("fold_manifest.csv must contain contiguous folds starting at zero.")
+print(len(df))
+PY
+)"
+[ "${FOLD_COUNT}" -gt 0 ] || { echo "ERROR: No LOPO folds found."; exit 1; }
+
+for ((fold = 0; fold < FOLD_COUNT; fold++)); do
+    [ -f "${SPLIT_DIR}/splits_${fold}.csv" ] || {
+        echo "ERROR: Missing ${SPLIT_DIR}/splits_${fold}.csv"
+        exit 1
+    }
 done
 
 [ ! -e "${RUN_DIR}" ] || {
@@ -187,114 +144,36 @@ done
     exit 1
 }
 
-module load "${CONDA_MODULE}"
+CONFIG_DIR="${RUN_DIR}/config"
+LOG_DIR="${RUN_DIR}/logs"
+RESULTS_DIR="${RUN_DIR}/results"
+mkdir -p "${CONFIG_DIR}" "${LOG_DIR}" "${RESULTS_DIR}"
+cp "${CONFIG_PATH}" "${CONFIG_DIR}/pipeline_config.json"
+cp "${SPLIT_DIR}/fold_manifest.csv" "${CONFIG_DIR}/fold_manifest.csv"
 
-PYTHON_CMD=(
-    conda run
-    --no-capture-output
-    -n "${CONDA_ENV}"
-    python
+export REPO_DIR DATASET_CSV PATIENT_ID_COL SLIDE_ID_COL LABEL_COL LABEL_VALUES_JSON
+export SPLIT_DIR FEATURES_DIR RUN_DIR RESULTS_DIR MODEL_TYPE EMBED_DIM MAX_EPOCHS
+export DROP_OUT EARLY_STOPPING TRAINING_SEED LR REG WEIGHTED_SAMPLE BAG_LOSS
+export INST_LOSS BAG_WEIGHT B_VALUE SUBTYPING LOG_DATA CONDA_MODULE CONDA_ENV
+
+SBATCH_ARGS=(
+    --export=ALL
+    --partition="${SLURM_PARTITION}"
+    --account="${SLURM_ACCOUNT}"
+    --qos="${SLURM_QOS}"
+    --array="0-$((FOLD_COUNT - 1))%${MAX_PARALLEL_FOLDS}"
+    --output="${LOG_DIR}/fold_%A_%a.out"
+    --error="${LOG_DIR}/fold_%A_%a.err"
 )
-
-"${PYTHON_CMD[@]}" - "${DATASET_CSV}" "${PT_DIR}" <<'PY'
-import sys
-from pathlib import Path
-import pandas as pd
-
-csv_path = Path(sys.argv[1])
-pt_dir = Path(sys.argv[2])
-
-df = pd.read_csv(csv_path)
-required = {"case_id", "slide_id", "grade"}
-missing = required - set(df.columns)
-
-if missing:
-    raise SystemExit("Dataset CSV missing columns: " + ", ".join(sorted(missing)))
-
-missing_features = []
-
-for slide_id in df["slide_id"].astype(str):
-    path = pt_dir / f"{slide_id}.pt"
-    if not path.is_file():
-        missing_features.append(str(path))
-
-if missing_features:
-    preview = "\n".join(missing_features[:20])
-    raise SystemExit(
-        f"Missing feature bags: {len(missing_features)}\n"
-        f"First missing files:\n{preview}"
-    )
-
-print(f"Feature validation passed: {len(df)} feature bags found.")
-PY
-
-mkdir -p "${CONFIG_DIR}/splits" "${LOG_DIR}" "${RESULTS_ROOT}"
-
-cp "${CONFIG_PATH}" "${CONFIG_DIR}/config_snapshot.json"
-cp "${DATASET_CSV}" "${CONFIG_DIR}/dataset.csv"
-cp "${SPLIT_DIR}"/splits_*.csv "${CONFIG_DIR}/splits/"
-
-cat > "${CONFIG_DIR}/training_config.txt" <<EOF
-RUN_ID=${RUN_ID}
-DATASET_NAME=${DATASET_NAME}
-DATASET_CSV=${DATASET_CSV}
-FEATURE_RUN_ID=${FEATURE_RUN_ID}
-FEATURE_DIR=${FEATURE_DIR}
-PT_DIR=${PT_DIR}
-SPLIT_SEED=${SPLIT_SEED}
-TRAIN_SEED=${TRAIN_SEED}
-SPLIT_NAME=${SPLIT_NAME}
-SPLIT_DIR=${SPLIT_DIR}
-TASK_NAME=${TASK_NAME}
-MODEL_TYPE=${MODEL_TYPE}
-EMBED_DIM=${EMBED_DIM}
-K_FOLDS=${K_FOLDS}
-EXP_CODE=${EXP_CODE}
-MAX_EPOCHS=${MAX_EPOCHS}
-DROP_OUT=${DROP_OUT}
-EARLY_STOPPING=${EARLY_STOPPING}
-LR=${LR}
-REG=${REG}
-WEIGHTED_SAMPLE=${WEIGHTED_SAMPLE}
-BAG_LOSS=${BAG_LOSS}
-INST_LOSS=${INST_LOSS}
-BAG_WEIGHT=${BAG_WEIGHT}
-B=${B_VALUE}
-SUBTYPING=${SUBTYPING}
-LOG_DATA=${LOG_DATA}
-EOF
-
-export RUN_ID REPO_DIR DATASET_CSV FEATURE_DIR SPLIT_NAME RESULTS_ROOT
-export TASK_NAME MODEL_TYPE EMBED_DIM K_FOLDS TRAIN_SEED EXP_CODE
-export MAX_EPOCHS DROP_OUT EARLY_STOPPING LR REG WEIGHTED_SAMPLE
-export BAG_LOSS INST_LOSS BAG_WEIGHT B_VALUE SUBTYPING LOG_DATA
-export CONDA_MODULE CONDA_ENV
-
-echo "Submitting CLAM grade training"
-echo
-echo "Feature run:    ${FEATURE_RUN_ID}"
-echo "Training run:   ${RUN_ID}"
-echo "Features:       ${FEATURE_DIR}"
-echo "Split set:      ${SPLIT_NAME}"
-echo "Model:          ${MODEL_TYPE}"
-echo "Embedding dim:  ${EMBED_DIM}"
-echo "Folds:          ${K_FOLDS}"
-echo "Train seed:     ${TRAIN_SEED}"
-echo "Results root:   ${RESULTS_ROOT}"
-echo
-
-if ! SUBMIT_OUTPUT="$(
-    sbatch --export=ALL --output="${LOG_DIR}/job.out" --error="${LOG_DIR}/job.err" "${SBATCH_SCRIPT}"
-)"; then
-    rm -rf "${RUN_DIR}"
-    echo "ERROR: Slurm submission failed."
-    exit 1
+if [ -n "${SLURM_EXCLUDE}" ]; then
+    SBATCH_ARGS+=(--exclude="${SLURM_EXCLUDE}")
 fi
 
-echo "${SUBMIT_OUTPUT}"
-JOB_ID="${SUBMIT_OUTPUT##* }"
+echo "Submitting ${FOLD_COUNT}-fold LOPO training array"
+echo "Dataset:       ${DATASET_NAME}"
+echo "Splits:        ${SPLIT_DIR}"
+echo "Feature bags:  ${FEATURES_DIR}"
+echo "Run directory: ${RUN_DIR}"
+echo "Parallel folds:${MAX_PARALLEL_FOLDS}"
 
-echo
-echo "Monitor: squeue -j ${JOB_ID}"
-echo "Logs:    tail -f \"${LOG_DIR}/job.out\""
-echo "Errors:  tail -f \"${LOG_DIR}/job.err\""
+sbatch "${SBATCH_ARGS[@]}" "${SCRIPT_DIR}/train_grade.sbatch"

@@ -14,7 +14,12 @@ import h5py
 from utils.utils import generate_split, nth
 
 def save_splits(split_datasets, column_keys, filename, boolean_style=False):
-	splits = [split_datasets[i].slide_data['slide_id'] for i in range(len(split_datasets))]
+	splits = [
+		split_datasets[i].slide_data['slide_id']
+		if split_datasets[i] is not None
+		else pd.Series(dtype=object)
+		for i in range(len(split_datasets))
+	]
 	if not boolean_style:
 		df = pd.concat(splits, ignore_index=True, axis=1)
 		df.columns = column_keys
@@ -40,6 +45,8 @@ class Generic_WSI_Classification_Dataset(Dataset):
 		patient_strat=False,
 		label_col = None,
 		patient_voting = 'max',
+		patient_id_col = 'case_id',
+		slide_id_col = 'slide_id',
 		):
 		"""
 		Args:
@@ -61,7 +68,27 @@ class Generic_WSI_Classification_Dataset(Dataset):
 			label_col = 'label'
 		self.label_col = label_col
 
-		slide_data = pd.read_csv(csv_path)
+		slide_data = pd.read_csv(
+			csv_path,
+			dtype={patient_id_col: str, slide_id_col: str},
+		)
+		missing_id_cols = {
+			patient_id_col,
+			slide_id_col,
+		} - set(slide_data.columns)
+		if missing_id_cols:
+			raise ValueError(
+				"Dataset CSV missing identifier columns: {}".format(
+					sorted(missing_id_cols)
+				)
+			)
+		slide_data = slide_data.copy()
+		if patient_id_col != 'case_id':
+			slide_data['case_id'] = slide_data[patient_id_col]
+		if slide_id_col != 'slide_id':
+			slide_data['slide_id'] = slide_data[slide_id_col]
+		slide_data['case_id'] = slide_data['case_id'].astype(str).str.strip()
+		slide_data['slide_id'] = slide_data['slide_id'].astype(str).str.strip()
 		slide_data = self.filter_df(slide_data, filter_dict)
 		slide_data = self.df_prep(slide_data, self.label_dict, ignore, self.label_col)
 
@@ -112,12 +139,19 @@ class Generic_WSI_Classification_Dataset(Dataset):
 		if label_col != 'label':
 			data['label'] = data[label_col].copy()
 
+		data['label'] = data['label'].astype(str).str.strip()
+		ignore = {str(value).strip() for value in ignore}
 		mask = data['label'].isin(ignore)
 		data = data[~mask]
 		data.reset_index(drop=True, inplace=True)
 		for i in data.index:
 			key = data.loc[i, 'label']
+			if key not in label_dict:
+				raise ValueError(
+					"Unknown label {!r} in column {!r}".format(key, label_col)
+				)
 			data.at[i, 'label'] = label_dict[key]
+		data['label'] = data['label'].astype(int)
 
 		return data
 
@@ -335,8 +369,8 @@ class Generic_MIL_Dataset(Generic_WSI_Classification_Dataset):
 
 		if not self.use_h5:
 			if self.data_dir:
-				full_path = os.path.join(data_dir, 'pt_files', '{}.pt'.format(slide_id))
-				features = torch.load(full_path)
+				full_path = os.path.join(data_dir, '{}.pt'.format(slide_id))
+				features = torch.load(full_path, map_location='cpu')
 				return features, label
 			
 			else:
@@ -365,5 +399,3 @@ class Generic_Split(Generic_MIL_Dataset):
 	def __len__(self):
 		return len(self.slide_data)
 		
-
-

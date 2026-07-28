@@ -3,9 +3,9 @@ set -euo pipefail
 
 usage() {
     echo "Usage:"
-    echo "  $0 single <slide_filename> --config configs/pannet_k4.json [--preset PRESET.csv] [options]"
-    echo "  $0 bulk <all|N|representatives> --config configs/pannet_k4.json [--preset PRESET.csv] [options]"
-    echo "  $0 bulk mapped --config configs/pannet_k4.json [--mapping MAP.csv] [options]"
+    echo "  $0 single <slide_filename> --config configs/pannet.json [--preset PRESET.csv] [options]"
+    echo "  $0 bulk <all|N|representatives> --config configs/pannet.json [--preset PRESET.csv] [options]"
+    echo "  $0 bulk mapped --config configs/pannet.json [--mapping MAP.csv] [options]"
     echo
     echo "Options:"
     echo "  --config FILE.json   Required"
@@ -16,10 +16,10 @@ usage() {
     echo "  --resume             Resume existing run folder"
     echo
     echo "Examples:"
-    echo "  $0 bulk mapped --config configs/pannet_k4.json --mapping pannet_case_preset_map.csv"
-    echo "  $0 bulk all --config configs/pannet_k4.json --preset clam_pannet_medium.csv"
-    echo "  $0 bulk 10 --config configs/pannet_k4.json --preset clam_pannet_strict.csv"
-    echo "  $0 single \"#1-1 7817B8509.tiff\" --config configs/pannet_k4.json --preset clam_pannet_loose.csv"
+    echo "  $0 bulk mapped --config configs/pannet.json --mapping case_preset_map.csv"
+    echo "  $0 bulk all --config configs/pannet.json --preset medium.csv"
+    echo "  $0 bulk 10 --config configs/pannet.json --preset strict.csv"
+    echo "  $0 single SLIDE.tiff --config configs/pannet.json --preset loose.csv"
 }
 
 if [ "$#" -lt 2 ]; then
@@ -103,24 +103,38 @@ import sys
 from pathlib import Path
 
 cfg = json.loads(Path(sys.argv[1]).read_text())
+ds = cfg.get("dataset", {})
 p = cfg.get("patching", {})
+rt = cfg.get("runtime", {})
+slurm = rt.get("slurm", {})
 
-dataset_name = cfg.get("dataset_name")
+dataset_name = ds.get("name")
 if not dataset_name:
-    raise SystemExit("Config missing required field: dataset_name")
+    raise SystemExit("Config missing required field: dataset.name")
 
-source_dir = p.get("source_dir")
+source_dir = ds.get("slides_directory")
 if not source_dir:
-    raise SystemExit("Config missing required field: patching.source_dir")
+    raise SystemExit("Config missing required field: dataset.slides_directory")
 
 print("DATASET_NAME=" + shlex.quote(str(dataset_name)))
 print("SOURCE_DIR=" + shlex.quote(str(source_dir)))
+print("DATASET_CSV=" + shlex.quote(str(ds.get("metadata_csv", ""))))
+print("PATIENT_ID_COL=" + shlex.quote(str(ds.get("patient_id_column", ""))))
+print("SLIDE_ID_COL=" + shlex.quote(str(ds.get("slide_id_column", ""))))
+print("SLIDE_EXTENSIONS_JSON=" + shlex.quote(json.dumps(ds.get("slide_extensions", [".svs"]))))
+print("PATCH_OUTPUT_ROOT=" + shlex.quote(str(p.get("output_root", ""))))
 print("PATCH_SIZE=" + str(int(p.get("patch_size", 256))))
 print("STEP_SIZE=" + str(int(p.get("step_size", p.get("patch_size", 256)))))
 print("PATCH_LEVEL=" + str(int(p.get("patch_level", 0))))
 print("DEFAULT_PRESET=" + shlex.quote(str(p.get("default_preset", ""))))
 print("DEFAULT_MAPPING=" + shlex.quote(str(p.get("default_mapping", ""))))
 print("MAPPING_HELPER_CONFIG=" + shlex.quote(str(p.get("mapping_helper", ""))))
+print("CONDA_MODULE=" + shlex.quote(str(rt.get("conda_module", "conda3/latest"))))
+print("CONDA_ENV=" + shlex.quote(str(rt.get("conda_environment", "clam_latest_valar"))))
+print("SLURM_PARTITION=" + shlex.quote(str(slurm.get("partition", "ai"))))
+print("SLURM_ACCOUNT=" + shlex.quote(str(slurm.get("account", "ai"))))
+print("SLURM_QOS=" + shlex.quote(str(slurm.get("qos", "ai"))))
+print("SLURM_EXCLUDE=" + shlex.quote(str(slurm.get("exclude_nodes", ""))))
 PY
 )
 
@@ -214,10 +228,18 @@ else
     [ -s "${PRESET_SOURCE}" ] || { echo "ERROR: Missing preset file: ${PRESET_SOURCE}"; exit 1; }
 fi
 
-mapfile -d '' ALL_SLIDES < <(
-    find "${SOURCE_DIR}" -maxdepth 1 -type f \
-        \( -iname '*.tif' -o -iname '*.tiff' \) \
-        -printf '%f\0' | LC_ALL=C sort -z
+mapfile -t ALL_SLIDES < <(
+    python - "${SOURCE_DIR}" "${SLIDE_EXTENSIONS_JSON}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1])
+suffixes = {suffix.lower() for suffix in json.loads(sys.argv[2])}
+for path in sorted(source.iterdir(), key=lambda item: item.name):
+    if path.is_file() and path.suffix.lower() in suffixes:
+        print(path.name)
+PY
 )
 
 TOTAL_SLIDES="${#ALL_SLIDES[@]}"
@@ -232,14 +254,6 @@ if [ "${MODE}" = "single" ]; then
         echo "ERROR: For single mode, pass only the slide filename."
         exit 1
     fi
-
-    case "${SLIDE_NAME,,}" in
-        *.tif|*.tiff) ;;
-        *)
-            echo "ERROR: Slide filename must end in .tif or .tiff."
-            exit 1
-            ;;
-    esac
 
     [ -f "${SOURCE_DIR}/${SLIDE_NAME}" ] || {
         echo "ERROR: Slide not found:"
@@ -257,32 +271,31 @@ else
             SELECTED_SLIDES=("${ALL_SLIDES[@]}")
             ;;
         representatives)
-            declare -A REPRESENTATIVE
-            declare -A REPRESENTATIVE_NUMBER
+            mapfile -t SELECTED_SLIDES < <(
+                python - "${DATASET_CSV}" "${SOURCE_DIR}" \
+                    "${PATIENT_ID_COL}" "${SLIDE_ID_COL}" "${SLIDE_EXTENSIONS_JSON}" <<'PY'
+import json
+import sys
+from pathlib import Path
+import pandas as pd
 
-            for SLIDE_NAME in "${ALL_SLIDES[@]}"; do
-                if [[ ! "${SLIDE_NAME}" =~ ^#([0-9]+)-([0-9]+)[[:space:]] ]]; then
-                    echo "ERROR: representatives mode currently expects PanNET-style filenames:"
-                    echo "       #<case>-<slide> <id>.tif/.tiff"
-                    echo "Bad filename: ${SLIDE_NAME}"
-                    exit 1
-                fi
+csv_path, source_dir, patient_col, slide_col, extensions_json = sys.argv[1:]
+source = Path(source_dir)
+extensions = json.loads(extensions_json)
+df = pd.read_csv(csv_path, dtype={patient_col: str, slide_col: str})
+missing = {patient_col, slide_col} - set(df.columns)
+if missing:
+    raise SystemExit(f"Metadata missing columns: {sorted(missing)}")
 
-                CASE_ID="$((10#${BASH_REMATCH[1]}))"
-                SLIDE_NUMBER="$((10#${BASH_REMATCH[2]}))"
-
-                if [[ -z "${REPRESENTATIVE[${CASE_ID}]+x}" ]] || \
-                   (( SLIDE_NUMBER < REPRESENTATIVE_NUMBER[${CASE_ID}] )); then
-                    REPRESENTATIVE["${CASE_ID}"]="${SLIDE_NAME}"
-                    REPRESENTATIVE_NUMBER["${CASE_ID}"]="${SLIDE_NUMBER}"
-                fi
-            done
-
-            mapfile -t CASE_IDS < <(printf '%s\n' "${!REPRESENTATIVE[@]}" | sort -n)
-
-            for CASE_ID in "${CASE_IDS[@]}"; do
-                SELECTED_SLIDES+=("${REPRESENTATIVE[${CASE_ID}]}")
-            done
+for _, group in df.groupby(patient_col, sort=True):
+    slide_id = sorted(group[slide_col].astype(str).str.strip())[0]
+    matches = [source / f"{slide_id}{extension}" for extension in extensions]
+    existing = [path for path in matches if path.is_file()]
+    if len(existing) != 1:
+        raise SystemExit(f"Expected one WSI for representative slide {slide_id}: {matches}")
+    print(existing[0].name)
+PY
+            )
             ;;
         *)
             if [[ ! "${TARGET}" =~ ^[1-9][0-9]*$ ]]; then
@@ -350,7 +363,8 @@ fi
 
 RUN_ID="$(printf '%s' "${RUN_ID}" | tr '/' '_')"
 
-RUN_DIR="${REPO_DIR}/runs/patching/${RUN_ID}"
+[ -n "${PATCH_OUTPUT_ROOT}" ] || { echo "ERROR: patching.output_root is required."; exit 1; }
+RUN_DIR="${PATCH_OUTPUT_ROOT}/${RUN_ID}"
 CONFIG_DIR="${RUN_DIR}/config"
 LOG_DIR="${RUN_DIR}/logs"
 RESULTS_DIR="${RUN_DIR}/results"
@@ -396,7 +410,11 @@ else
         conda run --no-capture-output -n "${CONDA_ENV}" \
             python "${MAPPING_HELPER}" \
             --source-dir "${SOURCE_DIR}" \
-            --case-map "${MAPPING_PATH}" \
+            --metadata-csv "${DATASET_CSV}" \
+            --patient-id-column "${PATIENT_ID_COL}" \
+            --slide-id-column "${SLIDE_ID_COL}" \
+            --slide-extensions-json "${SLIDE_EXTENSIONS_JSON}" \
+            --patient-map "${MAPPING_PATH}" \
             --presets-dir "${PRESETS_DIR}" \
             --config-dir "${CONFIG_DIR}"
 
@@ -440,6 +458,7 @@ fi
 export RUN_ID RUN_MODE REPO_DIR SOURCE_DIR RESULTS_DIR CONFIG_DIR LOG_DIR
 export PATCH_MODE PRESET_PATH PROCESS_LIST_PATH MAPPED_GROUPS_PATH
 export PATCH_SIZE STEP_SIZE PATCH_LEVEL
+export CONDA_MODULE CONDA_ENV
 
 echo "Submitting CLAM create_patches_fp job"
 echo
@@ -473,9 +492,19 @@ fi
 
 echo
 
-if ! SUBMIT_OUTPUT="$(
-    sbatch --export=ALL --output="${LOG_OUT}" --error="${LOG_ERR}" "${SBATCH_SCRIPT}"
-)"; then
+SBATCH_ARGS=(
+    --export=ALL
+    --partition="${SLURM_PARTITION}"
+    --account="${SLURM_ACCOUNT}"
+    --qos="${SLURM_QOS}"
+    --output="${LOG_OUT}"
+    --error="${LOG_ERR}"
+)
+if [ -n "${SLURM_EXCLUDE}" ]; then
+    SBATCH_ARGS+=(--exclude="${SLURM_EXCLUDE}")
+fi
+
+if ! SUBMIT_OUTPUT="$(sbatch "${SBATCH_ARGS[@]}" "${SBATCH_SCRIPT}")"; then
     echo "ERROR: Slurm submission failed."
 
     if [ "${CREATED_NEW_RUN}" = "true" ]; then

@@ -3,13 +3,13 @@ set -euo pipefail
 
 usage() {
     echo "Usage:"
-    echo "  $0 <patching_run_id> --config configs/pannet_k4.json [options]"
+    echo "  $0 <patching_run_id> --config configs/pannet.json [options]"
     echo
     echo "Options:"
     echo "  --config FILE.json          Required dataset config"
-    echo "  --model-name NAME           Override feature_extraction.model_name"
-    echo "  --batch-size N              Override feature_extraction.batch_size"
-    echo "  --target-patch-size N       Override feature_extraction.target_patch_size"
+    echo "  --model-name NAME           Override features.model_name"
+    echo "  --batch-size N              Override features.batch_size"
+    echo "  --target-patch-size N       Override features.target_patch_size"
     echo "  --run-id RUN_ID             Optional custom feature run id"
     echo "  --resume                    Resume an existing feature run"
 }
@@ -102,17 +102,29 @@ import sys
 from pathlib import Path
 
 cfg = json.loads(Path(sys.argv[1]).read_text())
+dataset = cfg.get("dataset", {})
 patching = cfg.get("patching", {})
-fe = cfg.get("feature_extraction", {})
+fe = cfg.get("features", {})
+rt = cfg.get("runtime", {})
+slurm = rt.get("slurm", {})
 
-source_dir = patching.get("source_dir")
+source_dir = dataset.get("slides_directory")
 if not source_dir:
-    raise SystemExit("Config missing required field: patching.source_dir")
+    raise SystemExit("Config missing required field: dataset.slides_directory")
 
 print("DATA_SLIDE_DIR=" + shlex.quote(str(source_dir)))
+print("PATCH_OUTPUT_ROOT=" + shlex.quote(str(patching.get("output_root", ""))))
+print("FEATURE_OUTPUT_ROOT=" + shlex.quote(str(fe.get("output_root", ""))))
 print("DEFAULT_MODEL_NAME=" + shlex.quote(str(fe.get("model_name", "resnet50_trunc"))))
 print("DEFAULT_BATCH_SIZE=" + shlex.quote(str(fe.get("batch_size", 1024))))
 print("DEFAULT_TARGET_PATCH_SIZE=" + shlex.quote(str(fe.get("target_patch_size", 224))))
+print("DEFAULT_SLIDE_EXT=" + shlex.quote(str(dataset.get("slide_extension", ".svs"))))
+print("CONDA_MODULE=" + shlex.quote(str(rt.get("conda_module", "conda3/latest"))))
+print("CONDA_ENV=" + shlex.quote(str(rt.get("conda_environment", "clam_latest_valar"))))
+print("SLURM_PARTITION=" + shlex.quote(str(slurm.get("partition", "ai"))))
+print("SLURM_ACCOUNT=" + shlex.quote(str(slurm.get("account", "ai"))))
+print("SLURM_QOS=" + shlex.quote(str(slurm.get("qos", "ai"))))
+print("SLURM_EXCLUDE=" + shlex.quote(str(slurm.get("exclude_nodes", ""))))
 PY
 )
 
@@ -123,9 +135,11 @@ done
 MODEL_NAME="${MODEL_NAME_OVERRIDE:-${DEFAULT_MODEL_NAME}}"
 BATCH_SIZE="${BATCH_SIZE_OVERRIDE:-${DEFAULT_BATCH_SIZE}}"
 TARGET_PATCH_SIZE="${TARGET_PATCH_SIZE_OVERRIDE:-${DEFAULT_TARGET_PATCH_SIZE}}"
-SLIDE_EXT=".tiff"
+SLIDE_EXT="${DEFAULT_SLIDE_EXT}"
 
-PATCHING_RUN_DIR="${REPO_DIR}/runs/patching/${PATCHING_RUN_ID}"
+[ -n "${PATCH_OUTPUT_ROOT}" ] || { echo "ERROR: patching.output_root is required."; exit 1; }
+[ -n "${FEATURE_OUTPUT_ROOT}" ] || { echo "ERROR: features.output_root is required."; exit 1; }
+PATCHING_RUN_DIR="${PATCH_OUTPUT_ROOT}/${PATCHING_RUN_ID}"
 DATA_H5_DIR="${PATCHING_RUN_DIR}/results"
 PATCHES_DIR="${DATA_H5_DIR}/patches"
 
@@ -171,7 +185,7 @@ fi
 RUN_ID="${CUSTOM_RUN_ID:-${BASE_RUN_ID}}"
 RUN_ID="$(printf '%s' "${RUN_ID}" | tr '/' '_')"
 
-RUN_DIR="${REPO_DIR}/runs/feature_extraction/${RUN_ID}"
+RUN_DIR="${FEATURE_OUTPUT_ROOT}/${RUN_ID}"
 CONFIG_DIR="${RUN_DIR}/config"
 LOG_DIR="${RUN_DIR}/logs"
 FEAT_DIR="${RUN_DIR}/results"
@@ -261,9 +275,19 @@ echo "Slide extension:   ${SLIDE_EXT}"
 echo "Output directory:  ${FEAT_DIR}"
 echo
 
-if ! SUBMIT_OUTPUT="$(
-    sbatch --export=ALL --output="${LOG_OUT}" --error="${LOG_ERR}" "${SBATCH_SCRIPT}"
-)"; then
+SBATCH_ARGS=(
+    --export=ALL
+    --partition="${SLURM_PARTITION}"
+    --account="${SLURM_ACCOUNT}"
+    --qos="${SLURM_QOS}"
+    --output="${LOG_OUT}"
+    --error="${LOG_ERR}"
+)
+if [ -n "${SLURM_EXCLUDE}" ]; then
+    SBATCH_ARGS+=(--exclude="${SLURM_EXCLUDE}")
+fi
+
+if ! SUBMIT_OUTPUT="$(sbatch "${SBATCH_ARGS[@]}" "${SBATCH_SCRIPT}")"; then
     echo "ERROR: Sbatch submission failed."
 
     if [ "${CREATED_NEW_RUN}" = "true" ]; then

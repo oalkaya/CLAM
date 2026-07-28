@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import json
 import pickle
-import re
 from pathlib import Path
 
 import numpy as np
@@ -18,546 +16,369 @@ from sklearn.metrics import (
     mean_absolute_error,
 )
 
+from custom_utils.pipeline_config import (
+    load_config,
+    normalize_scalar,
+    normalize_with_aliases,
+)
 
-IPS_LABELS = ["IPS1", "IPS2", "IPS3"]
-IPS_TO_NUM = {"IPS1": 1, "IPS2": 2, "IPS3": 3}
+
+KNOWN_SLIDE_SUFFIXES = (".tiff", ".tif", ".svs", ".ndpi", ".mrxs")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Pool CLAM out-of-fold slide predictions from training result PKLs, "
-            "aggregate them into PanNET IPS predictions, and summarize metrics across seeds."
+            "Pool LOPO slide predictions, aggregate one prediction per patient, "
+            "and compute patient-level metrics."
         )
     )
-
     parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--seeds", type=int, nargs="*", default=None)
-    parser.add_argument("--run-id-template", default=None)
+    parser.add_argument("--run-dir", type=Path, default=None)
     parser.add_argument("--out-dir", type=Path, default=None)
-    parser.add_argument("--method-name", default=None)
-
     return parser.parse_args()
 
 
-def normalize_slide_id(x: object) -> str:
-    s = str(x).strip()
-
-    for ext in [".tiff", ".tif", ".svs", ".ndpi", ".mrxs"]:
-        if s.lower().endswith(ext):
-            return s[: -len(ext)]
-
-    return s
+def normalize_slide_id(value: object) -> str:
+    slide_id = normalize_scalar(value)
+    for suffix in KNOWN_SLIDE_SUFFIXES:
+        if slide_id.lower().endswith(suffix):
+            return slide_id[: -len(suffix)]
+    return slide_id
 
 
-def normalize_ips(x: object) -> str:
-    s = str(x).strip().upper()
+def representative_three(values: pd.Series) -> tuple[list[float], float]:
+    ordered = sorted(float(value) for value in values)
+    if len(ordered) < 3:
+        raise ValueError("At least three observed slide grades are required.")
 
-    mapping = {
-        "A": "IPS1",
-        "B": "IPS2",
-        "C": "IPS3",
-        "1": "IPS1",
-        "2": "IPS2",
-        "3": "IPS3",
-        "IPS1": "IPS1",
-        "IPS2": "IPS2",
-        "IPS3": "IPS3",
-    }
-
-    if s not in mapping:
-        raise ValueError(f"Unknown IPS label: {x}")
-
-    return mapping[s]
+    selected = [ordered[0], ordered[(len(ordered) - 1) // 2], ordered[-1]]
+    return selected, float(sum(selected))
 
 
-def parse_pannet_slide_number(slide_id: str) -> int | None:
-    match = re.match(r"^#(?P<case>\d+)-(?P<slide>\d+)\s+", slide_id)
-
-    if not match:
-        return None
-
-    return int(match.group("slide"))
+def aggregate_label(total: float, thresholds: list[dict[str, object]]) -> str:
+    for threshold in thresholds:
+        if "max" not in threshold or total <= float(threshold["max"]):
+            return str(threshold["label"])
+    raise ValueError(f"No aggregation threshold accepts total {total}.")
 
 
-def ips_from_grade_sum(grade_sum: float) -> str:
-    if grade_sum <= 6:
-        return "IPS1"
+def load_fold_results(
+    pkl_path: Path,
+    fold: int,
+    label_values: list[object],
+) -> pd.DataFrame:
+    with pkl_path.open("rb") as handle:
+        results = pickle.load(handle)
 
-    if grade_sum <= 9:
-        return "IPS2"
-
-    return "IPS3"
-
-
-def load_training_pkl(pkl_path: Path, fold: int) -> pd.DataFrame:
-    with pkl_path.open("rb") as f:
-        results = pickle.load(f)
-
-    rows = []
-
+    rows: list[dict[str, object]] = []
     for key, item in results.items():
-        slide_id = str(key)
+        if not isinstance(item, dict):
+            raise TypeError(f"Unsupported result entry in {pkl_path}: {type(item)}")
 
-        if isinstance(item, dict):
-            if "slide_id" in item:
-                raw_slide_id = np.asarray(item["slide_id"]).reshape(-1)[0]
-                slide_id = str(raw_slide_id)
+        raw_slide_id = item.get("slide_id", key)
+        slide_id = str(np.asarray(raw_slide_id).reshape(-1)[0])
+        probabilities = np.asarray(item["prob"], dtype=float).reshape(-1)
+        true_index = int(np.asarray(item["label"]).reshape(-1)[0])
 
-            prob = np.asarray(item["prob"]).reshape(-1)
-            label = int(np.asarray(item["label"]).reshape(-1)[0])
-        else:
-            raise TypeError(
-                f"Unsupported result entry type in {pkl_path}: {type(item)}"
+        if len(probabilities) != len(label_values):
+            raise ValueError(
+                f"{pkl_path}: expected {len(label_values)} probabilities, "
+                f"found {len(probabilities)} for {slide_id}."
             )
+        if not 0 <= true_index < len(label_values):
+            raise ValueError(f"{pkl_path}: invalid label index {true_index}.")
 
-        pred_0based = int(prob.argmax())
-        true_grade = label + 1
-        pred_grade = pred_0based + 1
-        expected_grade = float(sum((i + 1) * float(p) for i, p in enumerate(prob)))
-
-        row = {
+        numeric_labels = np.asarray(label_values, dtype=float)
+        predicted_index = int(probabilities.argmax())
+        row: dict[str, object] = {
             "fold": fold,
             "slide_id": normalize_slide_id(slide_id),
-            "true_grade_from_pkl": true_grade,
-            "pred_grade": pred_grade,
-            "expected_grade": expected_grade,
+            "true_slide_grade_from_pkl": float(numeric_labels[true_index]),
+            "predicted_slide_grade": float(numeric_labels[predicted_index]),
+            "expected_slide_grade": float(probabilities @ numeric_labels),
         }
-
-        for i, p in enumerate(prob):
-            row[f"prob_grade_{i + 1}"] = float(p)
-
+        for index, probability in enumerate(probabilities):
+            row[f"probability_{normalize_scalar(label_values[index])}"] = float(
+                probability
+            )
         rows.append(row)
 
     return pd.DataFrame(rows)
 
 
-def find_fold_pkl(run_dir: Path, fold: int) -> Path:
+def find_fold_result(run_dir: Path, fold: int) -> Path:
     matches = sorted(run_dir.glob(f"results/**/split_{fold}_results.pkl"))
-
     if not matches:
-        raise FileNotFoundError(
-            f"No split_{fold}_results.pkl found under {run_dir}/results"
-        )
-
-    if len(matches) > 1:
-        joined = "\n".join(str(x) for x in matches)
+        matches = sorted(run_dir.glob(f"**/split_{fold}_results.pkl"))
+    if len(matches) != 1:
+        listing = "\n".join(str(path) for path in matches) or "(none)"
         raise RuntimeError(
-            f"Multiple split_{fold}_results.pkl files found for one fold:\n{joined}"
+            f"Expected exactly one result PKL for fold {fold}; found "
+            f"{len(matches)}:\n{listing}"
         )
-
     return matches[0]
 
 
-def prepare_dataset(dataset_csv: Path) -> pd.DataFrame:
-    df = pd.read_csv(dataset_csv)
+def prepare_metadata(config: dict[str, object]) -> pd.DataFrame:
+    dataset = config["dataset"]
+    metadata_path = Path(dataset["metadata_csv"]).expanduser()
+    patient_column = dataset["patient_id_column"]
+    slide_column = dataset["slide_id_column"]
+    grade_column = dataset["slide_label"]["column"]
+    frame = pd.read_csv(
+        metadata_path,
+        dtype={patient_column: str, slide_column: str},
+    )
+    required = {patient_column, slide_column, grade_column}
 
-    required = {"case_id", "slide_id", "grade", "ips"}
-    missing = required - set(df.columns)
+    patient_label = dataset.get("patient_label")
+    if patient_label:
+        required.add(patient_label["column"])
 
+    missing = required - set(frame.columns)
     if missing:
-        raise SystemExit(
-            "Dataset CSV missing required columns: "
-            + ", ".join(sorted(missing))
-        )
+        raise ValueError(f"Dataset CSV missing required columns: {sorted(missing)}")
 
-    df = df.copy()
-    df["slide_id"] = df["slide_id"].map(normalize_slide_id)
-    df["case_id"] = df["case_id"].astype(str)
-    df["grade"] = df["grade"].astype(int)
-    df["true_ips"] = df["ips"].map(normalize_ips)
-
-    if "slide_number" not in df.columns:
-        df["slide_number"] = df["slide_id"].map(parse_pannet_slide_number)
-
-    return df[
-        ["case_id", "slide_id", "slide_number", "grade", "true_ips"]
-    ].copy()
-
-
-def build_case_predictions(
-    slide_predictions: pd.DataFrame,
-    dataset: pd.DataFrame,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    merged = slide_predictions.merge(
-        dataset,
-        on="slide_id",
-        how="left",
-        validate="many_to_one",
+    output = pd.DataFrame(
+        {
+            "patient_id": frame[patient_column].map(normalize_scalar),
+            "slide_id": frame[slide_column].map(normalize_slide_id),
+            "true_slide_grade": pd.to_numeric(frame[grade_column], errors="raise"),
+        }
     )
 
-    missing_meta = merged[merged["case_id"].isna()].copy()
+    if patient_label:
+        aliases = patient_label.get("aliases", {})
+        output["true_patient_label"] = frame[patient_label["column"]].map(
+            lambda value: normalize_with_aliases(value, aliases)
+        )
 
-    if not missing_meta.empty:
-        merged = merged[merged["case_id"].notna()].copy()
+    if output["slide_id"].duplicated().any():
+        duplicates = output.loc[output["slide_id"].duplicated(), "slide_id"].tolist()
+        raise ValueError(f"Duplicate metadata slide IDs: {duplicates[:20]}")
+    return output
 
-    grade_mismatch = merged[
-        merged["true_grade_from_pkl"].astype(int) != merged["grade"].astype(int)
+
+def build_patient_predictions(
+    slide_predictions: pd.DataFrame,
+    metadata: pd.DataFrame,
+    thresholds: list[dict[str, object]],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    merged = slide_predictions.merge(
+        metadata,
+        on="slide_id",
+        how="left",
+        validate="one_to_one",
+    )
+    if merged["patient_id"].isna().any():
+        missing = merged.loc[merged["patient_id"].isna(), "slide_id"].tolist()
+        raise ValueError(f"Predicted slides missing from metadata: {missing[:20]}")
+
+    mismatch = merged[
+        ~np.isclose(
+            merged["true_slide_grade_from_pkl"].astype(float),
+            merged["true_slide_grade"].astype(float),
+        )
     ].copy()
+    if not mismatch.empty:
+        raise ValueError(
+            f"{len(mismatch)} slide labels in result PKLs disagree with metadata."
+        )
 
-    rows = []
-    skipped = []
-
-    for case_id, group in merged.groupby("case_id", sort=True):
-        true_ips_values = sorted(group["true_ips"].dropna().unique())
-
-        if len(true_ips_values) != 1:
-            skipped.append(
-                {
-                    "case_id": case_id,
-                    "reason": "inconsistent_or_missing_true_ips",
-                    "slides_seen": len(group),
-                }
+    patient_rows: list[dict[str, object]] = []
+    for patient_id, group in merged.groupby("patient_id", sort=True):
+        fold_values = group["fold"].unique()
+        if len(fold_values) != 1:
+            raise ValueError(f"Patient {patient_id} occurs in multiple LOPO folds.")
+        if len(group) < 3:
+            raise ValueError(
+                f"LOPO test patient {patient_id} has only {len(group)} predicted slides."
             )
-            continue
 
-        reps = group[group["slide_number"].isin([1, 2, 3])].copy()
+        true_selected, true_sum = representative_three(group["true_slide_grade"])
+        hard_selected, hard_sum = representative_three(
+            group["predicted_slide_grade"]
+        )
+        soft_selected, soft_sum = representative_three(
+            group["expected_slide_grade"]
+        )
 
-        if set(reps["slide_number"].dropna().astype(int)) != {1, 2, 3}:
-            skipped.append(
-                {
-                    "case_id": case_id,
-                    "reason": "missing_required_slides_1_2_3",
-                    "slides_seen": len(group),
-                }
-            )
-            continue
+        derived_true_label = aggregate_label(true_sum, thresholds)
+        if "true_patient_label" in group:
+            labels = group["true_patient_label"].dropna().unique()
+            if len(labels) != 1:
+                raise ValueError(
+                    f"Patient {patient_id} has inconsistent patient labels."
+                )
+            true_label = str(labels[0])
+        else:
+            true_label = derived_true_label
 
-        if reps["slide_number"].duplicated().any():
-            skipped.append(
-                {
-                    "case_id": case_id,
-                    "reason": "duplicate_required_slide_number",
-                    "slides_seen": len(group),
-                }
-            )
-            continue
-
-        reps = reps.sort_values("slide_number")
-
-        true_grade_sum = int(reps["grade"].sum())
-        pred_grade_sum = int(reps["pred_grade"].sum())
-        expected_grade_sum = float(reps["expected_grade"].sum())
-
-        rows.append(
+        patient_rows.append(
             {
-                "case_id": case_id,
-                "fold": int(reps["fold"].iloc[0]),
-                "true_ips": true_ips_values[0],
-                "true_ips_num": IPS_TO_NUM[true_ips_values[0]],
-                "pred_ips": ips_from_grade_sum(pred_grade_sum),
-                "pred_ips_num": IPS_TO_NUM[ips_from_grade_sum(pred_grade_sum)],
-                "soft_pred_ips": ips_from_grade_sum(expected_grade_sum),
-                "soft_pred_ips_num": IPS_TO_NUM[ips_from_grade_sum(expected_grade_sum)],
-                "true_grade_sum": true_grade_sum,
-                "pred_grade_sum": pred_grade_sum,
-                "expected_grade_sum": expected_grade_sum,
-                "slide_ids": "|".join(reps["slide_id"].astype(str)),
-                "true_grades": "|".join(reps["grade"].astype(str)),
-                "pred_grades": "|".join(reps["pred_grade"].astype(str)),
+                "patient_id": patient_id,
+                "fold": int(fold_values[0]),
+                "n_observed_slides": len(group),
+                "true_label": true_label,
+                "derived_true_label": derived_true_label,
+                "true_label_matches_derived": true_label == derived_true_label,
+                "hard_prediction": aggregate_label(hard_sum, thresholds),
+                "soft_prediction": aggregate_label(soft_sum, thresholds),
+                "true_representative_grades": "|".join(
+                    f"{value:g}" for value in true_selected
+                ),
+                "hard_representative_grades": "|".join(
+                    f"{value:g}" for value in hard_selected
+                ),
+                "soft_representative_grades": "|".join(
+                    f"{value:.6f}" for value in soft_selected
+                ),
+                "true_grade_sum": true_sum,
+                "hard_grade_sum": hard_sum,
+                "soft_grade_sum": soft_sum,
+                "slide_ids": "|".join(group["slide_id"].astype(str)),
             }
         )
 
-    skipped_df = pd.DataFrame(skipped)
-
-    return pd.DataFrame(rows), skipped_df, grade_mismatch
+    return pd.DataFrame(patient_rows), merged
 
 
-def compute_metrics(case_df: pd.DataFrame, pred_col: str = "pred_ips") -> dict[str, float]:
-    y_true = case_df["true_ips"].astype(str)
-    y_pred = case_df[pred_col].astype(str)
-
-    y_true_num = y_true.map(IPS_TO_NUM)
-    y_pred_num = y_pred.map(IPS_TO_NUM)
-
+def compute_metrics(
+    patient_predictions: pd.DataFrame,
+    prediction_column: str,
+    labels: list[str],
+) -> dict[str, float | int | str]:
+    true_labels = patient_predictions["true_label"].astype(str)
+    predicted_labels = patient_predictions[prediction_column].astype(str)
+    ordinal = {label: index + 1 for index, label in enumerate(labels)}
     per_class = f1_score(
-        y_true,
-        y_pred,
-        labels=IPS_LABELS,
+        true_labels,
+        predicted_labels,
+        labels=labels,
         average=None,
         zero_division=0,
     )
 
-    return {
-        "n_cases": float(len(case_df)),
-        "accuracy": float(accuracy_score(y_true, y_pred)),
-        "IPS1_F1": float(per_class[0]),
-        "IPS2_F1": float(per_class[1]),
-        "IPS3_F1": float(per_class[2]),
+    metrics: dict[str, float | int | str] = {
+        "prediction_type": prediction_column,
+        "n_patients": len(patient_predictions),
+        "accuracy": float(accuracy_score(true_labels, predicted_labels)),
         "macro_F1": float(
             f1_score(
-                y_true,
-                y_pred,
-                labels=IPS_LABELS,
+                true_labels,
+                predicted_labels,
+                labels=labels,
                 average="macro",
                 zero_division=0,
             )
         ),
         "weighted_F1": float(
             f1_score(
-                y_true,
-                y_pred,
-                labels=IPS_LABELS,
+                true_labels,
+                predicted_labels,
+                labels=labels,
                 average="weighted",
                 zero_division=0,
             )
         ),
-        "MAE": float(mean_absolute_error(y_true_num, y_pred_num)),
+        "MAE": float(
+            mean_absolute_error(
+                true_labels.map(ordinal),
+                predicted_labels.map(ordinal),
+            )
+        ),
         "QWK": float(
             cohen_kappa_score(
-                y_true_num,
-                y_pred_num,
-                labels=[1, 2, 3],
+                true_labels.map(ordinal),
+                predicted_labels.map(ordinal),
+                labels=list(ordinal.values()),
                 weights="quadratic",
             )
         ),
     }
-
-
-def format_mean_std(mean: float, std: float, metric: str) -> str:
-    if metric in {
-        "accuracy",
-        "IPS1_F1",
-        "IPS2_F1",
-        "IPS3_F1",
-        "macro_F1",
-        "weighted_F1",
-    }:
-        return f"{mean * 100:.2f} ± {std * 100:.2f}"
-
-    return f"{mean:.3f} ± {std:.3f}"
+    for label, score in zip(labels, per_class):
+        metrics[f"{label}_F1"] = float(score)
+    return metrics
 
 
 def main() -> None:
     args = parse_args()
+    config, _ = load_config(args.config)
+    split_dir = Path(config["splits"]["directory"]).expanduser()
+    run_dir = args.run_dir or Path(config["training"]["run_directory"]).expanduser()
+    out_dir = args.out_dir or Path(
+        config["evaluation"]["output_directory"]
+    ).expanduser()
 
-    repo_dir = Path.cwd()
-    config_path = args.config if args.config.is_absolute() else repo_dir / args.config
-    cfg = json.loads(config_path.read_text())
+    manifest_path = split_dir / "fold_manifest.csv"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"Missing LOPO fold manifest: {manifest_path}")
+    manifest = pd.read_csv(manifest_path, dtype={"test_patient": str})
+    expected_folds = sorted(manifest["fold"].astype(int).tolist())
 
-    dataset_name = cfg["dataset_name"]
-    dataset_csv = repo_dir / cfg["dataset_csv"]
-    k = int(cfg["k"])
-    seeds = args.seeds if args.seeds else [int(x) for x in cfg["seeds"]]
+    label_values = config["dataset"]["slide_label"]["values"]
+    slide_frames = [
+        load_fold_results(find_fold_result(run_dir, fold), fold, label_values)
+        for fold in expected_folds
+    ]
+    slide_predictions = pd.concat(slide_frames, ignore_index=True)
+    if slide_predictions["slide_id"].duplicated().any():
+        duplicates = slide_predictions.loc[
+            slide_predictions["slide_id"].duplicated(keep=False), "slide_id"
+        ].tolist()
+        raise ValueError(f"Duplicate OOF slide predictions: {duplicates[:20]}")
 
-    training_cfg = cfg.get("training", {})
-    feature_run_id = training_cfg.get("feature_run_id", "pannet_virchow2_40x1024")
-    model_type = training_cfg.get("model_type", "clam_mb")
+    metadata = prepare_metadata(config)
+    thresholds = config["evaluation"]["aggregation"]["thresholds"]
+    patient_predictions, merged_slides = build_patient_predictions(
+        slide_predictions,
+        metadata,
+        thresholds,
+    )
 
-    run_id_template = args.run_id_template
-    if run_id_template is None:
-        run_id_template = (
-            "{feature_run_id}_{dataset_name}_grade_{model_type}"
-            "_cv{k}_split{seed}_train{seed}"
+    expected_patients = set(manifest["test_patient"].map(normalize_scalar))
+    observed_patients = set(patient_predictions["patient_id"].map(normalize_scalar))
+    if expected_patients != observed_patients:
+        raise ValueError(
+            "OOF patient coverage differs from the LOPO manifest. "
+            f"Missing={sorted(expected_patients - observed_patients)}, "
+            f"unexpected={sorted(observed_patients - expected_patients)}"
         )
 
-    method_name = args.method_name
-    if method_name is None:
-        method_name = f"{model_type} + {feature_run_id}"
-
-    out_dir = args.out_dir
-    if out_dir is None:
-        safe_method = re.sub(r"[^A-Za-z0-9_.-]+", "_", method_name)
-        out_dir = (
-            repo_dir
-            / "runs"
-            / "evaluation"
-            / "ips_oof"
-            / f"{dataset_name}_{safe_method}_cv{k}"
-        )
-    elif not out_dir.is_absolute():
-        out_dir = repo_dir / out_dir
+    patient_label = config["dataset"].get("patient_label")
+    labels = (
+        [str(value) for value in patient_label["values"]]
+        if patient_label
+        else [str(item["label"]) for item in thresholds]
+    )
+    metric_rows = [
+        compute_metrics(patient_predictions, "hard_prediction", labels),
+        compute_metrics(patient_predictions, "soft_prediction", labels),
+    ]
+    metrics = pd.DataFrame(metric_rows)
 
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    dataset = prepare_dataset(dataset_csv)
-
-    seed_metric_rows = []
-    all_case_rows = []
-    all_slide_rows = []
-
-    for seed in seeds:
-        run_id = run_id_template.format(
-            seed=seed,
-            split_seed=seed,
-            train_seed=seed,
-            feature_run_id=feature_run_id,
-            dataset_name=dataset_name,
-            model_type=model_type,
-            k=k,
-        )
-
-        run_dir = repo_dir / "runs" / "training" / run_id
-
-        if not run_dir.is_dir():
-            raise SystemExit(f"Missing training run directory: {run_dir}")
-
-        slide_frames = []
-
-        for fold in range(k):
-            pkl_path = find_fold_pkl(run_dir, fold)
-            fold_df = load_training_pkl(pkl_path, fold)
-            fold_df["seed"] = seed
-            fold_df["training_run_id"] = run_id
-            fold_df["result_pkl"] = str(pkl_path)
-            slide_frames.append(fold_df)
-
-        seed_slide_df = pd.concat(slide_frames, ignore_index=True)
-
-        duplicate_slide_predictions = seed_slide_df[
-            seed_slide_df.duplicated(subset=["slide_id"], keep=False)
-        ]
-
-        if not duplicate_slide_predictions.empty:
-            duplicates_path = out_dir / f"seed_{seed}_duplicate_slide_predictions.csv"
-            duplicate_slide_predictions.to_csv(duplicates_path, index=False)
-            raise SystemExit(
-                f"Seed {seed} has duplicate OOF slide predictions across folds. "
-                f"Saved duplicates to {duplicates_path}"
-            )
-
-        case_df, skipped_df, grade_mismatch_df = build_case_predictions(
-            seed_slide_df,
-            dataset,
-        )
-
-        if case_df.empty:
-            raise SystemExit(f"No case-level IPS predictions produced for seed {seed}")
-
-        hard_metrics = compute_metrics(case_df, pred_col="pred_ips")
-        soft_metrics = compute_metrics(case_df, pred_col="soft_pred_ips")
-
-        hard_metrics.update(
-            {
-                "seed": seed,
-                "training_run_id": run_id,
-                "prediction_type": "hard_grade_sum",
-            }
-        )
-
-        soft_metrics.update(
-            {
-                "seed": seed,
-                "training_run_id": run_id,
-                "prediction_type": "soft_expected_grade_sum",
-            }
-        )
-
-        seed_metric_rows.append(hard_metrics)
-        seed_metric_rows.append(soft_metrics)
-
-        case_df["seed"] = seed
-        case_df["training_run_id"] = run_id
-        seed_slide_df["seed"] = seed
-
-        case_df.to_csv(out_dir / f"seed_{seed}_case_oof_predictions.csv", index=False)
-        seed_slide_df.to_csv(out_dir / f"seed_{seed}_slide_oof_predictions.csv", index=False)
-        skipped_df.to_csv(out_dir / f"seed_{seed}_skipped_cases.csv", index=False)
-        grade_mismatch_df.to_csv(out_dir / f"seed_{seed}_grade_mismatches.csv", index=False)
-
-        cm = confusion_matrix(
-            case_df["true_ips"],
-            case_df["pred_ips"],
-            labels=IPS_LABELS,
-        )
-        cm_df = pd.DataFrame(
-            cm,
-            index=[f"true_{x}" for x in IPS_LABELS],
-            columns=[f"pred_{x}" for x in IPS_LABELS],
-        )
-        cm_df.to_csv(out_dir / f"seed_{seed}_confusion_matrix.csv")
-
-        all_case_rows.append(case_df)
-        all_slide_rows.append(seed_slide_df)
-
-    seed_metrics = pd.DataFrame(seed_metric_rows)
-    seed_metrics = seed_metrics[
-        [
-            "seed",
-            "prediction_type",
-            "training_run_id",
-            "n_cases",
-            "accuracy",
-            "IPS1_F1",
-            "IPS2_F1",
-            "IPS3_F1",
-            "macro_F1",
-            "weighted_F1",
-            "MAE",
-            "QWK",
-        ]
-    ]
-
-    seed_metrics.to_csv(out_dir / "seed_metrics.csv", index=False)
-
-    metric_cols = [
-        "accuracy",
-        "IPS1_F1",
-        "IPS2_F1",
-        "IPS3_F1",
-        "macro_F1",
-        "weighted_F1",
-        "MAE",
-        "QWK",
-    ]
-
-    summary_rows = []
-
-    for prediction_type, group in seed_metrics.groupby("prediction_type"):
-        row = {
-            "method": method_name,
-            "prediction_type": prediction_type,
-            "n_seeds": len(group),
-            "mean_n_cases": group["n_cases"].mean(),
-        }
-
-        for metric in metric_cols:
-            row[f"{metric}_mean"] = group[metric].mean()
-            row[f"{metric}_std"] = group[metric].std(ddof=1) if len(group) > 1 else 0.0
-            row[f"{metric}_var"] = group[metric].var(ddof=1) if len(group) > 1 else 0.0
-
-        summary_rows.append(row)
-
-    summary = pd.DataFrame(summary_rows)
-    summary.to_csv(out_dir / "summary_mean_std_var.csv", index=False)
-
-    thesis_rows = []
-
-    for _, row in summary.iterrows():
-        out = {
-            "Method": row["method"],
-            "Prediction": row["prediction_type"],
-            "IPS1 F1": format_mean_std(row["IPS1_F1_mean"], row["IPS1_F1_std"], "IPS1_F1"),
-            "IPS2 F1": format_mean_std(row["IPS2_F1_mean"], row["IPS2_F1_std"], "IPS2_F1"),
-            "IPS3 F1": format_mean_std(row["IPS3_F1_mean"], row["IPS3_F1_std"], "IPS3_F1"),
-            "Macro F1": format_mean_std(row["macro_F1_mean"], row["macro_F1_std"], "macro_F1"),
-            "Weighted F1": format_mean_std(row["weighted_F1_mean"], row["weighted_F1_std"], "weighted_F1"),
-            "MAE": format_mean_std(row["MAE_mean"], row["MAE_std"], "MAE"),
-            "QWK": format_mean_std(row["QWK_mean"], row["QWK_std"], "QWK"),
-        }
-
-        thesis_rows.append(out)
-
-    thesis_table = pd.DataFrame(thesis_rows)
-    thesis_table.to_csv(out_dir / "thesis_style_table.csv", index=False)
-
-    pd.concat(all_case_rows, ignore_index=True).to_csv(
-        out_dir / "all_case_oof_predictions.csv",
-        index=False,
+    patient_predictions.to_csv(
+        out_dir / "patient_oof_predictions.csv", index=False
     )
+    merged_slides.to_csv(out_dir / "slide_oof_predictions.csv", index=False)
+    metrics.to_csv(out_dir / "metrics.csv", index=False)
 
-    pd.concat(all_slide_rows, ignore_index=True).to_csv(
-        out_dir / "all_slide_oof_predictions.csv",
-        index=False,
-    )
+    for prediction_column in ["hard_prediction", "soft_prediction"]:
+        matrix = confusion_matrix(
+            patient_predictions["true_label"],
+            patient_predictions[prediction_column],
+            labels=labels,
+        )
+        pd.DataFrame(
+            matrix,
+            index=[f"true_{label}" for label in labels],
+            columns=[f"pred_{label}" for label in labels],
+        ).to_csv(out_dir / f"{prediction_column}_confusion_matrix.csv")
 
-    print()
-    print("Seed metrics:")
-    print(seed_metrics.to_string(index=False))
-    print()
-    print("Thesis-style table:")
-    print(thesis_table.to_string(index=False))
-    print()
+    print(metrics.to_string(index=False))
+    print(f"Evaluated LOPO patients: {len(patient_predictions)}")
     print(f"Saved outputs under: {out_dir}")
 
 

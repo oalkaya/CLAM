@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "dataset": {
+    "name": "pannet",
+    "metadata_csv": "/home/hpc-oalkaya/repos/CLAM/dataset_csv/pannet_wsi_grade.csv",
+    "slides_directory": "/userfiles/cgunduz/new_datasets/pannet_dataset/IPS/PANNET Slides",
+    "slide_extensions": [
+      ".tif",
+      ".tiff"
+    ],
+    "slide_extension": ".tiff",
+    "patient_id_column": "case_id",
+    "slide_id_column": "slide_id",
+    "slide_label": {
+      "column": "grade",
+      "values": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ]
+    },
+    "patient_label": {
+      "column": "ips",
+      "values": [
+        "IPS1",
+        "IPS2",
+        "IPS3"
+      ],
+      "aliases": {
+        "A": "IPS1",
+        "B": "IPS2",
+        "C": "IPS3",
+        "1": "IPS1",
+        "2": "IPS2",
+        "3": "IPS3"
+      }
+    }
+  },
+  "splits": {
+    "strategy": "leave_one_patient_out",
+    "directory": "/home/hpc-oalkaya/repos/CLAM/splits/task_pannet_grade_lopo",
+    "minimum_test_slides": 3,
+    "ineligible_patient_policy": "train_only",
+    "validation": {
+      "strategy": "none"
+    }
+  },
+  "patching": {
+    "output_root": "/home/hpc-oalkaya/repos/CLAM/runs/patching",
+    "patch_size": 1024,
+    "step_size": 1024,
+    "patch_level": 0,
+    "default_preset": "medium.csv",
+    "default_mapping": "case_to_preset_map.csv",
+    "mapping_helper": "custom_utils/build_mapped_process_lists.py"
+  },
+  "features": {
+    "output_root": "/home/hpc-oalkaya/repos/CLAM/runs/feature_extraction",
+    "model_name": "resnet50_trunc",
+    "batch_size": 1024,
+    "target_patch_size": 224
+  },
+  "training": {
+    "feature_bags_dir": "/home/hpc-oalkaya/repos/CLAM/runs/feature_extraction/pannet_virchow2_40x1024/results/pt_files",
+    "run_directory": "/home/hpc-oalkaya/repos/CLAM/runs/training/pannet_virchow2_40x1024_grade_clam_mb_lopo",
+    "model_type": "clam_mb",
+    "embed_dim": 2560,
+    "max_epochs": 200,
+    "drop_out": 0.5,
+    "early_stopping": false,
+    "training_seed": 1,
+    "max_parallel_folds": 4,
+    "lr": 0.00005,
+    "reg": 0.0001,
+    "weighted_sample": true,
+    "bag_loss": "ce",
+    "inst_loss": "ce",
+    "bag_weight": 0.9,
+    "B": 8,
+    "subtyping": false,
+    "log_data": true
+  },
+  "evaluation": {
+    "output_directory": "/home/hpc-oalkaya/repos/CLAM/runs/evaluation/pannet_grade_clam_mb_lopo",
+    "aggregation": {
+      "type": "ordered_representative_three",
+      "thresholds": [
+        {
+          "max": 6,
+          "label": "IPS1"
+        },
+        {
+          "max": 9,
+          "label": "IPS2"
+        },
+        {
+          "label": "IPS3"
+        }
+      ]
+    }
+  },
+  "runtime": {
+    "conda_module": "conda3/latest",
+    "conda_environment": "clam_latest_valar",
+    "slurm": {
+      "partition": "ai",
+      "account": "ai",
+      "qos": "ai",
+      "exclude_nodes": "ai11,ai12,ai13,ai14"
+    }
+  }
+}

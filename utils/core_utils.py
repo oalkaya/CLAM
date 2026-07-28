@@ -110,7 +110,7 @@ def train(datasets, cur, args):
     save_splits(datasets, ['train', 'val', 'test'], os.path.join(args.results_dir, 'splits_{}.csv'.format(cur)))
     print('Done!')
     print("Training on {} samples".format(len(train_split)))
-    print("Validating on {} samples".format(len(val_split)))
+    print("Validating on {} samples".format(len(val_split) if val_split is not None else 0))
     print("Testing on {} samples".format(len(test_split)))
 
     print('\nInit loss function...', end=' ')
@@ -169,11 +169,17 @@ def train(datasets, cur, args):
     
     print('\nInit Loaders...', end=' ')
     train_loader = get_split_loader(train_split, training=True, testing = args.testing, weighted = args.weighted_sample)
-    val_loader = get_split_loader(val_split,  testing = args.testing)
+    val_loader = (
+        get_split_loader(val_split, testing=args.testing)
+        if val_split is not None
+        else None
+    )
     test_loader = get_split_loader(test_split, testing = args.testing)
     print('Done!')
 
     print('\nSetup EarlyStopping...', end=' ')
+    if args.early_stopping and val_loader is None:
+        raise ValueError("Early stopping requires a non-empty validation split.")
     if args.early_stopping:
         early_stopping = EarlyStopping(patience = 20, stop_epoch=50, verbose = True)
 
@@ -182,15 +188,27 @@ def train(datasets, cur, args):
     print('Done!')
 
     for epoch in range(args.max_epochs):
-        if args.model_type in ['clam_sb', 'clam_mb'] and not args.no_inst_cluster:     
+        if args.model_type in ['clam_sb', 'clam_mb'] and not args.no_inst_cluster:
             train_loop_clam(epoch, model, train_loader, optimizer, args.n_classes, args.bag_weight, writer, loss_fn)
-            stop = validate_clam(cur, epoch, model, val_loader, args.n_classes, 
-                early_stopping, writer, loss_fn, args.results_dir)
+            stop = (
+                validate_clam(
+                    cur, epoch, model, val_loader, args.n_classes,
+                    early_stopping, writer, loss_fn, args.results_dir
+                )
+                if val_loader is not None
+                else False
+            )
         
         else:
             train_loop(epoch, model, train_loader, optimizer, args.n_classes, writer, loss_fn)
-            stop = validate(cur, epoch, model, val_loader, args.n_classes, 
-                early_stopping, writer, loss_fn, args.results_dir)
+            stop = (
+                validate(
+                    cur, epoch, model, val_loader, args.n_classes,
+                    early_stopping, writer, loss_fn, args.results_dir
+                )
+                if val_loader is not None
+                else False
+            )
         
         if stop: 
             break
@@ -200,8 +218,13 @@ def train(datasets, cur, args):
     else:
         torch.save(model.state_dict(), os.path.join(args.results_dir, "s_{}_checkpoint.pt".format(cur)))
 
-    _, val_error, val_auc, _= summary(model, val_loader, args.n_classes)
-    print('Val error: {:.4f}, ROC AUC: {:.4f}'.format(val_error, val_auc))
+    if val_loader is not None:
+        _, val_error, val_auc, _ = summary(model, val_loader, args.n_classes)
+        print('Val error: {:.4f}, ROC AUC: {:.4f}'.format(val_error, val_auc))
+    else:
+        val_error = float('nan')
+        val_auc = float('nan')
+        print('No validation split configured.')
 
     results_dict, test_error, test_auc, acc_logger = summary(model, test_loader, args.n_classes)
     print('Test error: {:.4f}, ROC AUC: {:.4f}'.format(test_error, test_auc))
@@ -214,8 +237,9 @@ def train(datasets, cur, args):
             writer.add_scalar('final/test_class_{}_acc'.format(i), acc, 0)
 
     if writer:
-        writer.add_scalar('final/val_error', val_error, 0)
-        writer.add_scalar('final/val_auc', val_auc, 0)
+        if val_loader is not None:
+            writer.add_scalar('final/val_error', val_error, 0)
+            writer.add_scalar('final/val_auc', val_auc, 0)
         writer.add_scalar('final/test_error', test_error, 0)
         writer.add_scalar('final/test_auc', test_auc, 0)
         writer.close()
