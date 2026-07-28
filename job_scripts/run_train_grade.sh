@@ -82,10 +82,6 @@ for line in "${CFG_LINES[@]}"; do
     eval "${line}"
 done
 
-[ "${EARLY_STOPPING}" = "false" ] || {
-    echo "ERROR: Exact LOPO has no validation set; training.early_stopping must be false."
-    exit 1
-}
 [ -f "${DATASET_CSV}" ] || { echo "ERROR: Missing dataset CSV: ${DATASET_CSV}"; exit 1; }
 [ -d "${FEATURES_DIR}" ] || { echo "ERROR: Missing feature bags: ${FEATURES_DIR}"; exit 1; }
 [ -d "${SPLIT_DIR}" ] || { echo "ERROR: Missing split directory: ${SPLIT_DIR}"; exit 1; }

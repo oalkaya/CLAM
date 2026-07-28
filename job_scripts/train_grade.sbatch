@@ -12,7 +12,7 @@ set -euo pipefail
 required_vars=(
     REPO_DIR DATASET_CSV PATIENT_ID_COL SLIDE_ID_COL LABEL_COL LABEL_VALUES_JSON
     SPLIT_DIR FEATURES_DIR RESULTS_DIR FOLD_COUNT MODEL_TYPE EMBED_DIM MAX_EPOCHS DROP_OUT
-    TRAINING_SEED LR REG WEIGHTED_SAMPLE BAG_LOSS INST_LOSS BAG_WEIGHT B_VALUE
+    EARLY_STOPPING TRAINING_SEED LR REG WEIGHTED_SAMPLE BAG_LOSS INST_LOSS BAG_WEIGHT B_VALUE
     SUBTYPING LOG_DATA CONDA_MODULE CONDA_ENV
 )
 for var in "${required_vars[@]}"; do
@@ -76,6 +76,7 @@ for ((fold = 0; fold < FOLD_COUNT; fold++)); do
     )
 
     if [ "${WEIGHTED_SAMPLE}" = "true" ]; then command+=(--weighted_sample); fi
+    if [ "${EARLY_STOPPING}" = "true" ]; then command+=(--early_stopping); fi
     if [ "${SUBTYPING}" = "true" ]; then command+=(--subtyping); fi
     if [ "${LOG_DATA}" = "true" ]; then command+=(--log_data); fi
 

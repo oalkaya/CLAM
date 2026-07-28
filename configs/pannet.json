@@ -40,11 +40,13 @@
   },
   "splits": {
     "strategy": "leave_one_patient_out",
-    "directory": "/home/hpc-oalkaya/repos/CLAM/splits/task_pannet_grade_lopo",
+    "directory": "/home/hpc-oalkaya/repos/CLAM/splits/task_pannet_grade_lopo_val20",
     "minimum_test_slides": 3,
     "ineligible_patient_policy": "train_only",
     "validation": {
-      "strategy": "none"
+      "strategy": "stratified_patient_fraction",
+      "fraction": 0.2,
+      "seed": 42
     }
   },
   "patching": {
@@ -64,12 +66,12 @@
   },
   "training": {
     "feature_bags_dir": "/home/hpc-oalkaya/repos/CLAM/runs/feature_extraction/pannet_virchow2_40x1024/results/pt_files",
-    "run_directory": "/home/hpc-oalkaya/repos/CLAM/runs/training/pannet_virchow2_40x1024_grade_clam_mb_lopo",
+    "run_directory": "/home/hpc-oalkaya/repos/CLAM/runs/training/pannet_virchow2_40x1024_grade_clam_mb_lopo_val20",
     "model_type": "clam_mb",
     "embed_dim": 2560,
     "max_epochs": 200,
     "drop_out": 0.5,
-    "early_stopping": false,
+    "early_stopping": true,
     "training_seed": 1,
     "lr": 0.00005,
     "reg": 0.0001,
@@ -82,7 +84,7 @@
     "log_data": true
   },
   "evaluation": {
-    "output_directory": "/home/hpc-oalkaya/repos/CLAM/runs/evaluation/pannet_grade_clam_mb_lopo",
+    "output_directory": "/home/hpc-oalkaya/repos/CLAM/runs/evaluation/pannet_grade_clam_mb_lopo_val20",
     "aggregation": {
       "type": "ordered_representative_three",
       "thresholds": [

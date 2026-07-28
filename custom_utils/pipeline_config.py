@@ -71,11 +71,26 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("splits.minimum_test_slides must be positive.")
 
     validation = config["splits"].get("validation", {"strategy": "none"})
-    if validation.get("strategy", "none") != "none":
+    validation_strategy = validation.get("strategy", "none")
+    if validation_strategy not in {"none", "stratified_patient_fraction"}:
         raise ValueError(
-            "LOPO currently requires splits.validation.strategy='none' so each fold "
-            "trains on every patient except its single test patient."
+            "splits.validation.strategy must be 'none' or "
+            "'stratified_patient_fraction'."
         )
+    if validation_strategy == "stratified_patient_fraction":
+        fraction = float(validation.get("fraction", 0))
+        if not 0 < fraction < 1:
+            raise ValueError(
+                "splits.validation.fraction must be between zero and one."
+            )
+        int(validation.get("seed", 0))
+        require(config, "dataset.patient_label.column")
+        patient_labels = require(config, "dataset.patient_label.values")
+        if not isinstance(patient_labels, list) or len(patient_labels) < 2:
+            raise ValueError(
+                "dataset.patient_label.values must contain at least two values "
+                "for stratified validation."
+            )
 
     aggregation = config.get("evaluation", {}).get("aggregation")
     if aggregation is not None:

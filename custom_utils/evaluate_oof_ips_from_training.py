@@ -299,7 +299,68 @@ def compute_metrics(
     }
     for label, score in zip(labels, per_class):
         metrics[f"{label}_F1"] = float(score)
+        class_mask = true_labels == label
+        metrics[f"{label}_accuracy"] = (
+            float(accuracy_score(true_labels[class_mask], predicted_labels[class_mask]))
+            if class_mask.any()
+            else float("nan")
+        )
     return metrics
+
+
+def compute_slide_grade_metrics(
+    slide_predictions: pd.DataFrame,
+    grade_values: list[object],
+) -> dict[str, float | int]:
+    true_grades = slide_predictions["true_slide_grade"].astype(float)
+    predicted_grades = slide_predictions["predicted_slide_grade"].astype(float)
+    expected_grades = slide_predictions["expected_slide_grade"].astype(float)
+    numeric_grade_values = [float(value) for value in grade_values]
+
+    return {
+        "n_slides": len(slide_predictions),
+        "slide_accuracy": float(accuracy_score(true_grades, predicted_grades)),
+        "slide_macro_F1": float(
+            f1_score(
+                true_grades,
+                predicted_grades,
+                labels=numeric_grade_values,
+                average="macro",
+                zero_division=0,
+            )
+        ),
+        "slide_QWK": float(
+            cohen_kappa_score(
+                true_grades,
+                predicted_grades,
+                labels=numeric_grade_values,
+                weights="quadratic",
+            )
+        ),
+        "continuous_MAE": float(
+            mean_absolute_error(true_grades, expected_grades)
+        ),
+    }
+
+
+def build_metric_table(
+    slide_metrics: dict[str, float | int],
+    patient_metrics: pd.DataFrame,
+    ips_labels: list[str],
+) -> pd.DataFrame:
+    rows: list[dict[str, float | int | str]] = []
+    for _, patient_row in patient_metrics.iterrows():
+        row: dict[str, float | int | str] = {
+            "prediction_type": patient_row["prediction_type"],
+            **slide_metrics,
+            "n_patients": int(patient_row["n_patients"]),
+            "patient_macro_F1": float(patient_row["macro_F1"]),
+            "IPS_accuracy": float(patient_row["accuracy"]),
+        }
+        for label in ips_labels:
+            row[f"{label}_accuracy"] = float(patient_row[f"{label}_accuracy"])
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 
 def main() -> None:
@@ -357,6 +418,8 @@ def main() -> None:
         compute_metrics(patient_predictions, "soft_prediction", labels),
     ]
     metrics = pd.DataFrame(metric_rows)
+    slide_metrics = compute_slide_grade_metrics(merged_slides, label_values)
+    metric_table = build_metric_table(slide_metrics, metrics, labels)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     patient_predictions.to_csv(
@@ -364,6 +427,7 @@ def main() -> None:
     )
     merged_slides.to_csv(out_dir / "slide_oof_predictions.csv", index=False)
     metrics.to_csv(out_dir / "metrics.csv", index=False)
+    metric_table.to_csv(out_dir / "metric_table.csv", index=False)
 
     for prediction_column in ["hard_prediction", "soft_prediction"]:
         matrix = confusion_matrix(
@@ -377,7 +441,7 @@ def main() -> None:
             columns=[f"pred_{label}" for label in labels],
         ).to_csv(out_dir / f"{prediction_column}_confusion_matrix.csv")
 
-    print(metrics.to_string(index=False))
+    print(metric_table.to_string(index=False))
     print(f"Evaluated LOPO patients: {len(patient_predictions)}")
     print(f"Saved outputs under: {out_dir}")
 
