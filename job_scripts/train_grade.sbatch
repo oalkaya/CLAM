@@ -11,9 +11,9 @@ set -euo pipefail
 
 required_vars=(
     REPO_DIR DATASET_CSV PATIENT_ID_COL SLIDE_ID_COL LABEL_COL LABEL_VALUES_JSON
-    SPLIT_DIR FEATURES_DIR RESULTS_DIR MODEL_TYPE EMBED_DIM MAX_EPOCHS DROP_OUT
+    SPLIT_DIR FEATURES_DIR RESULTS_DIR FOLD_COUNT MODEL_TYPE EMBED_DIM MAX_EPOCHS DROP_OUT
     TRAINING_SEED LR REG WEIGHTED_SAMPLE BAG_LOSS INST_LOSS BAG_WEIGHT B_VALUE
-    SUBTYPING LOG_DATA CONDA_MODULE CONDA_ENV SLURM_ARRAY_TASK_ID
+    SUBTYPING LOG_DATA CONDA_MODULE CONDA_ENV
 )
 for var in "${required_vars[@]}"; do
     [ -n "${!var:-}" ] || { echo "ERROR: Required variable ${var} is not set."; exit 1; }
@@ -39,34 +39,51 @@ print("CUDA:", torch.version.cuda)
 print("GPU:", torch.cuda.get_device_name(0))
 PY
 
-command=(
-    python -u main.py
-    --dataset_csv "${DATASET_CSV}"
-    --features_dir "${FEATURES_DIR}"
-    --split_dir "${SPLIT_DIR}"
-    --results_dir "${RESULTS_DIR}"
-    --slide_id_col "${SLIDE_ID_COL}"
-    --patient_id_col "${PATIENT_ID_COL}"
-    --label_col "${LABEL_COL}"
-    --label_values "${LABEL_VALUES_JSON}"
-    --fold "${SLURM_ARRAY_TASK_ID}"
-    --model_type "${MODEL_TYPE}"
-    --embed_dim "${EMBED_DIM}"
-    --seed "${TRAINING_SEED}"
-    --max_epochs "${MAX_EPOCHS}"
-    --drop_out "${DROP_OUT}"
-    --lr "${LR}"
-    --reg "${REG}"
-    --bag_loss "${BAG_LOSS}"
-    --inst_loss "${INST_LOSS}"
-    --bag_weight "${BAG_WEIGHT}"
-    --B "${B_VALUE}"
-)
+echo "Running ${FOLD_COUNT} LOPO folds sequentially in Slurm job ${SLURM_JOB_ID}."
 
-if [ "${WEIGHTED_SAMPLE}" = "true" ]; then command+=(--weighted_sample); fi
-if [ "${SUBTYPING}" = "true" ]; then command+=(--subtyping); fi
-if [ "${LOG_DATA}" = "true" ]; then command+=(--log_data); fi
+for ((fold = 0; fold < FOLD_COUNT; fold++)); do
+    result_path="${RESULTS_DIR}/split_${fold}_results.pkl"
+    if [ -f "${result_path}" ]; then
+        echo "Skipping completed fold ${fold}: ${result_path}"
+        continue
+    fi
 
-printf ' %q' "${command[@]}"
+    echo
+    echo "Starting fold ${fold}/$((FOLD_COUNT - 1)): $(date)"
+
+    command=(
+        python -u main.py
+        --dataset_csv "${DATASET_CSV}"
+        --features_dir "${FEATURES_DIR}"
+        --split_dir "${SPLIT_DIR}"
+        --results_dir "${RESULTS_DIR}"
+        --slide_id_col "${SLIDE_ID_COL}"
+        --patient_id_col "${PATIENT_ID_COL}"
+        --label_col "${LABEL_COL}"
+        --label_values "${LABEL_VALUES_JSON}"
+        --fold "${fold}"
+        --model_type "${MODEL_TYPE}"
+        --embed_dim "${EMBED_DIM}"
+        --seed "${TRAINING_SEED}"
+        --max_epochs "${MAX_EPOCHS}"
+        --drop_out "${DROP_OUT}"
+        --lr "${LR}"
+        --reg "${REG}"
+        --bag_loss "${BAG_LOSS}"
+        --inst_loss "${INST_LOSS}"
+        --bag_weight "${BAG_WEIGHT}"
+        --B "${B_VALUE}"
+    )
+
+    if [ "${WEIGHTED_SAMPLE}" = "true" ]; then command+=(--weighted_sample); fi
+    if [ "${SUBTYPING}" = "true" ]; then command+=(--subtyping); fi
+    if [ "${LOG_DATA}" = "true" ]; then command+=(--log_data); fi
+
+    printf ' %q' "${command[@]}"
+    echo
+    "${command[@]}"
+    echo "Completed fold ${fold}: $(date)"
+done
+
 echo
-"${command[@]}"
+echo "All LOPO folds completed: $(date)"

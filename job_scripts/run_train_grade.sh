@@ -60,7 +60,6 @@ q("MAX_EPOCHS", int(tr.get("max_epochs", 200)))
 q("DROP_OUT", tr.get("drop_out", 0.25))
 b("EARLY_STOPPING", tr.get("early_stopping", False))
 q("TRAINING_SEED", int(tr.get("training_seed", 1)))
-q("MAX_PARALLEL_FOLDS", int(tr.get("max_parallel_folds", 1)))
 q("LR", tr.get("lr", 1e-4))
 q("REG", tr.get("reg", 1e-5))
 b("WEIGHTED_SAMPLE", tr.get("weighted_sample", False))
@@ -139,20 +138,18 @@ for ((fold = 0; fold < FOLD_COUNT; fold++)); do
     }
 done
 
-[ ! -e "${RUN_DIR}" ] || {
-    echo "ERROR: Training run already exists: ${RUN_DIR}"
-    exit 1
-}
-
 CONFIG_DIR="${RUN_DIR}/config"
 LOG_DIR="${RUN_DIR}/logs"
 RESULTS_DIR="${RUN_DIR}/results"
+if [ -d "${RUN_DIR}" ]; then
+    echo "Reusing existing training run directory: ${RUN_DIR}"
+fi
 mkdir -p "${CONFIG_DIR}" "${LOG_DIR}" "${RESULTS_DIR}"
-cp "${CONFIG_PATH}" "${CONFIG_DIR}/pipeline_config.json"
+cp "${CONFIG_PATH}" "${CONFIG_DIR}/pipeline_config.latest.json"
 cp "${SPLIT_DIR}/fold_manifest.csv" "${CONFIG_DIR}/fold_manifest.csv"
 
 export REPO_DIR DATASET_CSV PATIENT_ID_COL SLIDE_ID_COL LABEL_COL LABEL_VALUES_JSON
-export SPLIT_DIR FEATURES_DIR RUN_DIR RESULTS_DIR MODEL_TYPE EMBED_DIM MAX_EPOCHS
+export SPLIT_DIR FEATURES_DIR RUN_DIR RESULTS_DIR FOLD_COUNT MODEL_TYPE EMBED_DIM MAX_EPOCHS
 export DROP_OUT EARLY_STOPPING TRAINING_SEED LR REG WEIGHTED_SAMPLE BAG_LOSS
 export INST_LOSS BAG_WEIGHT B_VALUE SUBTYPING LOG_DATA CONDA_MODULE CONDA_ENV
 
@@ -161,19 +158,25 @@ SBATCH_ARGS=(
     --partition="${SLURM_PARTITION}"
     --account="${SLURM_ACCOUNT}"
     --qos="${SLURM_QOS}"
-    --array="0-$((FOLD_COUNT - 1))%${MAX_PARALLEL_FOLDS}"
-    --output="${LOG_DIR}/fold_%A_%a.out"
-    --error="${LOG_DIR}/fold_%A_%a.err"
+    --output="${LOG_DIR}/training_%j.out"
+    --error="${LOG_DIR}/training_%j.err"
 )
 if [ -n "${SLURM_EXCLUDE}" ]; then
     SBATCH_ARGS+=(--exclude="${SLURM_EXCLUDE}")
 fi
 
-echo "Submitting ${FOLD_COUNT}-fold LOPO training array"
+COMPLETED_FOLDS=0
+for ((fold = 0; fold < FOLD_COUNT; fold++)); do
+    if [ -f "${RESULTS_DIR}/split_${fold}_results.pkl" ]; then
+        COMPLETED_FOLDS=$((COMPLETED_FOLDS + 1))
+    fi
+done
+
+echo "Submitting one LOPO training job for ${FOLD_COUNT} folds"
 echo "Dataset:       ${DATASET_NAME}"
 echo "Splits:        ${SPLIT_DIR}"
 echo "Feature bags:  ${FEATURES_DIR}"
 echo "Run directory: ${RUN_DIR}"
-echo "Parallel folds:${MAX_PARALLEL_FOLDS}"
+echo "Completed:     ${COMPLETED_FOLDS}/${FOLD_COUNT} folds"
 
 sbatch "${SBATCH_ARGS[@]}" "${SCRIPT_DIR}/train_grade.sbatch"
