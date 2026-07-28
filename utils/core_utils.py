@@ -185,36 +185,52 @@ def train(datasets, cur, args):
         early_stopping = None
     print('Done!')
 
-    for epoch in range(args.max_epochs):
-        if args.model_type in ['clam_sb', 'clam_mb'] and not args.no_inst_cluster:
-            train_loop_clam(epoch, model, train_loader, optimizer, args.n_classes, args.bag_weight, writer, loss_fn)
-            stop = (
-                validate_clam(
-                    cur, epoch, model, val_loader, args.n_classes,
-                    early_stopping, writer, loss_fn, args.results_dir
+    checkpoint_path = os.path.join(
+        args.results_dir, "s_{}_checkpoint.pt".format(cur)
+    )
+    reuse_checkpoint = (
+        args.early_stopping
+        and os.environ.get("CLAM_REUSE_CHECKPOINT", "").lower()
+        in {"1", "true", "yes"}
+        and os.path.isfile(checkpoint_path)
+    )
+
+    if reuse_checkpoint:
+        print(
+            "\nReusing existing checkpoint for fold {} and skipping "
+            "optimization: {}".format(cur, checkpoint_path)
+        )
+    else:
+        for epoch in range(args.max_epochs):
+            if args.model_type in ['clam_sb', 'clam_mb'] and not args.no_inst_cluster:
+                train_loop_clam(epoch, model, train_loader, optimizer, args.n_classes, args.bag_weight, writer, loss_fn)
+                stop = (
+                    validate_clam(
+                        cur, epoch, model, val_loader, args.n_classes,
+                        early_stopping, writer, loss_fn, args.results_dir
+                    )
+                    if val_loader is not None
+                    else False
                 )
-                if val_loader is not None
-                else False
-            )
-        
-        else:
-            train_loop(epoch, model, train_loader, optimizer, args.n_classes, writer, loss_fn)
-            stop = (
-                validate(
-                    cur, epoch, model, val_loader, args.n_classes,
-                    early_stopping, writer, loss_fn, args.results_dir
+
+            else:
+                train_loop(epoch, model, train_loader, optimizer, args.n_classes, writer, loss_fn)
+                stop = (
+                    validate(
+                        cur, epoch, model, val_loader, args.n_classes,
+                        early_stopping, writer, loss_fn, args.results_dir
+                    )
+                    if val_loader is not None
+                    else False
                 )
-                if val_loader is not None
-                else False
-            )
-        
-        if stop: 
-            break
+
+            if stop:
+                break
 
     if args.early_stopping:
-        model.load_state_dict(torch.load(os.path.join(args.results_dir, "s_{}_checkpoint.pt".format(cur))))
+        model.load_state_dict(torch.load(checkpoint_path))
     else:
-        torch.save(model.state_dict(), os.path.join(args.results_dir, "s_{}_checkpoint.pt".format(cur)))
+        torch.save(model.state_dict(), checkpoint_path)
 
     if val_loader is not None:
         _, val_error, val_auc, _ = summary(model, val_loader, args.n_classes)
@@ -231,7 +247,7 @@ def train(datasets, cur, args):
         acc, correct, count = acc_logger.get_summary(i)
         print('class {}: acc {}, correct {}/{}'.format(i, acc, correct, count))
 
-        if writer:
+        if writer and acc is not None:
             writer.add_scalar('final/test_class_{}_acc'.format(i), acc, 0)
 
     if writer:

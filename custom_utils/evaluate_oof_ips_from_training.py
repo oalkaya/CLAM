@@ -16,11 +16,20 @@ from sklearn.metrics import (
     mean_absolute_error,
 )
 
-from custom_utils.pipeline_config import (
-    load_config,
-    normalize_scalar,
-    normalize_with_aliases,
-)
+try:
+    from custom_utils.pipeline_config import (
+        load_config,
+        normalize_scalar,
+        normalize_with_aliases,
+    )
+except ModuleNotFoundError as error:
+    if error.name != "custom_utils":
+        raise
+    from pipeline_config import (
+        load_config,
+        normalize_scalar,
+        normalize_with_aliases,
+    )
 
 
 KNOWN_SLIDE_SUFFIXES = (".tiff", ".tif", ".svs", ".ndpi", ".mrxs")
